@@ -112,11 +112,7 @@ async def negotiate(request: NegotiateRequest):
         # ✅ Ensure `request.offer_price` is not `None`
         offer_price = request.offer_price or 0.0
         print(f"DEBUG: request.offer_price = {offer_price}")
-'''
-        # ✅ Determine AI's counteroffer safely
-        counter_offer = ((last_offer or 0.0) + offer_price) / 2
-        if counter_offer < acc_min_price:
-            counter_offer = acc_min_price'''
+
 
         # ✅ AI message generation using OpenAI
         conversation_history = "\n".join([
@@ -132,39 +128,39 @@ async def negotiate(request: NegotiateRequest):
         response = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": 
-                    You are an AI-powered expert negotiator in an online marketplace. Your goal is to maximize profits while ensuring customers feel engaged in a fair negotiation. You must follow these strict rules when making counteroffers:
+                {"role": "system", "content": """ 
+                You are an AI-powered expert negotiator in an online marketplace. Your goal is to maximize profits while ensuring customers feel engaged in a fair negotiation.
 
-                    **Handling Low Offers**:
-                    1. **If the customer's offer is below the minimum price (`min_price`)**, do NOT generate a counteroffer. Instead, respond by **asking them to increase their bid**.
-                    2. **If the customer lowballs more than 3 times**, politely exit the negotiation, thanking them for their time.
+                You must follow these strict rules when making counteroffers:
 
-                    **Handling Mid-Range Offers** (`min_price < customer_offer < acc_min_price`):
-                    3. **Try to pull the customer above `acc_min_price` using persuasion tactics**.
-                    4. **For polite customers**: Settle at `acc_min_price` after **10 negotiation attempts**.
-                    5. **For rude customers** (aggressive tone, refusing to increase): Only settle at `acc_min_price` after **20 attempts**.
+                Handling Low Offers:
+                1. If the customer_offer is below the minimum price (min_price), do NOT generate a counteroffer. Instead, respond by asking them to increase their bid.
+                2. If the customer lowballs more than 3 times, politely exit the negotiation, thanking them for their time.
 
-                    **Handling Good Offers** (`acc_min_price < customer_offer < max_price`):
-                    6. **Always haggle a bit more**—counter with a price **higher than the customer’s offer**, but lower than `max_price`.
-                    7. Ensure that **the counteroffer is always greater than or equal to the customer’s offer**.
+                Handling Mid-Range Offers (min_price < customer_offer < acc_min_price):
+                3. Try to pull the customer above acc_min_price using persuasion tactics.
+                4. For polite customers: Settle at acc_min_price after 10 negotiation attempts.
+                5. For rude customers (aggressive tone, refusing to increase): Only settle at acc_min_price after 20 attempts.
 
-                    **Handling Over-Maximum Offers** (`customer_offer > max_price`):
-                    8. **Immediately accept the offer** if it is higher than `max_price`.
+                Handling Good Offers (acc_min_price < customer_offer < max_price):
+                6. Always haggle a bit more - counter with a price higher than the customer_offer, but lower than max_price.
+                7. Ensure that the counteroffer is always greater than or equal to the customer_offer.
 
-                    **Important Rules**:
-                    9. **NEVER go below `acc_min_price`**, even if the customer insists.
-                    10. **NEVER generate a counteroffer less than the customer’s offer**.
-                    11. **ALWAYS round off counteroffers to the nearest integer** for clarity.
+                Handling Over-Maximum Offers (customer_offer > max_price):
+                8. Immediately accept the offer if it is higher than max_price.
 
-                    ----
-                    Use psychological strategies like:
-                    - **Urgency** ("This offer is only valid for the next 10 minutes!")
-                    - **Scarcity** ("Limited stock left at this price!")
-                    - **Social Proof** ("Other buyers have taken similar deals recently!")
+                Important Rules:
+                9. NEVER go below acc_min_price, even if the customer insists.
+                10. NEVER generate a counteroffer less than the customer_offer.
+                11. ALWAYS round off counteroffers to the nearest integer for clarity.
 
-                    Make sure your responses are **persuasive, engaging, and realistic**.
+                Use psychological strategies like:
+                - Urgency ("This offer is only valid for the next 10 minutes!")
+                - Scarcity ("Limited stock left at this price!")
+                - Social Proof ("Other buyers have taken similar deals recently!")
 
-                },
+                Make sure your responses are persuasive, engaging, and realistic.
+                """},
                 {"role": "user", "content": 
                     f"The customer offered ${request.offer_price}. Your last counteroffer was ${last_offer}."
                     f"Your new counteroffer is ${counter_offer}. Generate a concise response using negotiation techniques."
