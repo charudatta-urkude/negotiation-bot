@@ -136,7 +136,8 @@ async def negotiate(request: NegotiateRequest):
                     "You are a negotiation AI for an e-commerce platform."
                     "You must maximize profit while keeping the customer engaged."
                     "Follow these rules:"
-                    "\n1. Never offer a price below the minimum acceptable price."
+                    "\n1. **Never offer a price below the minimum acceptable price.**"
+                    "\n2. **Never give a counteroffer less than customer offer.**"
                     "\n2. Always make a counteroffer slightly higher than the customer's offer, but within reasonable limits."
                     "\n3. If a customer lowballs more than 3 times, politely exit the negotiation."
                     "\n4. Use psychological tactics to persuade the customer:"
@@ -152,7 +153,7 @@ async def negotiate(request: NegotiateRequest):
                     f"Your new counteroffer is ${counter_offer}. Generate a concise response using negotiation techniques."
                 }
             ],
-            temperature=0.7,
+            temperature=0.5,
             max_tokens=50  # ✅ Keeps responses short and relevant
         )
 
