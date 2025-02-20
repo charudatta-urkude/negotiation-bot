@@ -41,8 +41,6 @@ if not SUPABASE_URL or not SUPABASE_KEY:
     raise Exception("Supabase credentials not found. Please set them.")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ✅ Cache Pricing Data
-pricing_cache = TTLCache(maxsize=100, ttl=600)
 
 # ✅ API Response Standardization
 def create_response(status: str, message: str, data: dict = None):
