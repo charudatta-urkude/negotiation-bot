@@ -1,199 +1,423 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from typing import Optional
-import openai
 import os
 import uuid
+import random
 import logging
+import asyncio
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel
 from supabase import create_client, Client
 from datetime import datetime
+import openai
+import json
+from cachetools import TTLCache
 
-# ✅ Initialize FastAPI
+# ✅ Security & Rate Limiting
+API_KEY = os.getenv("API_KEY", "your-secure-api-key")
+api_key_header = APIKeyHeader(name="X-API-Key")
+
+async def verify_api_key(api_key: str = api_key_header):
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API key")
+
+# Initialize OpenAI API settings
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if not OPENAI_API_KEY:
+    raise Exception("OpenAI API key is missing. Please set it as an environment variable.")
+
+# ✅ OpenAI API Initialization using v1.0.0+ syntax
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
+
+# Initialize FastAPI app instance
 app = FastAPI()
 
-# ✅ Setup Logging
+# Setup Basic Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# ✅ Supabase Client Initialization
+# Supabase Client Initialization
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise Exception("Supabase credentials not found. Please set them.")
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# ✅ OpenAI API Initialization
-openai.api_key = OPENAI_API_KEY
+# ✅ Cache Pricing Data
+pricing_cache = TTLCache(maxsize=100, ttl=600)
 
-# ✅ Pydantic Models for API Requests
-class StartNegotiationRequest(BaseModel):
+# ✅ API Response Standardization
+def create_response(status: str, message: str, data: dict = None):
+    return {"status": status, "message": message, "data": data or {}}
+
+# Define Data Models
+class StartSessionRequest(BaseModel):
     user_id: str
     product_id: str
 
-class NegotiateRequest(BaseModel):
+class OfferRequest(BaseModel):
     session_id: str
-    user_id: str
-    product_id: str
-    offer_price: Optional[float] = 0.0
-    customer_message: Optional[str] = None
+    customer_message: str  # Accept natural language as input
 
-# ✅ Step 1: Start a Negotiation Session
-@app.post("/start_negotiation")
-async def start_negotiation(request: StartNegotiationRequest):
+# ✅ Async DB Queries (Performance Optimization)
+async def fetch_session_data(session_id: str):
+    return await asyncio.to_thread(
+        supabase.table("history").select("*").eq("session_id", session_id).order("created_at", desc=True).limit(1).execute
+    )
+
+async def get_pricing_data(product_id: str):
+    if product_id in pricing_cache:
+        return pricing_cache[product_id]
+    
+    pricing_data = await asyncio.to_thread(
+        supabase.table("pricing").select("*").eq("product_id", product_id).execute
+    )
+    
+    if pricing_data.data:
+        pricing_cache[product_id] = pricing_data.data[0]
+        return pricing_data.data[0]
+    
+    raise HTTPException(status_code=404, detail="Product pricing not found")
+
+# --- ✅ AI-Powered Extraction & Intent Detection ---
+def extract_offer_intent(customer_message: str) -> dict:
+    """
+    Calls OpenAI GPT-3.5-turbo-instruct to extract the numerical offer and determine customer intent.
+    """
+    extraction_prompt = f"""
+Extract the numerical offer and negotiation intent from the following message:
+- Customer message: "{customer_message}"
+
+Provide a structured JSON response:
+{{
+  "extracted_offer": <value_or_null>,
+  "intent": <"final_offer", "discount_request", "hesitation", "negotiate", "other">
+}}
+    """
+    response = client.completions.create(
+        model="gpt-3.5-turbo-instruct",
+        prompt=extraction_prompt,   # Using prompt parameter for completions
+        temperature=0.2,
+        max_tokens=50
+    )
     try:
-        # ✅ Fetch product details from Supabase
-        product = supabase.table("pricing").select("*").eq("product_id", request.product_id).execute()
+        result = json.loads(response.choices[0].text.strip())
+    except json.JSONDecodeError as e:
+        logging.error(f"JSON decode error in extracting intent/offer: {e}")
+        result = {"extracted_offer": None, "intent": "other"}
+    except Exception as e:
+        logging.error(f"Error in extracting intent/offer: {e}")
+        result = {"extracted_offer": None, "intent": "other"}
+    return result
+
+# --- ✅ AI-Generated Human-Like Response ---
+def generate_ai_response(customer_message: str, extracted_offer: float, counter_offer: float, round_number: int, intent: str) -> str:
+    """
+    Uses GPT-4-turbo to generate persuasive counter-offer responses.
+    Adjusts the response tone based on the extracted customer intent.
+    """
+    response_prompt = f"""
+    Customer: "{customer_message}"
+    Extracted Offer: {extracted_offer if extracted_offer else 'no offer'}
+    Correct Counter Offer: {counter_offer}
+    Intent: {intent}
+    Current round is {round_number}
+
+    You are a negotiation assistant. Your goal is to respond in a way that aligns with the customer's intent while keeping the counter-offer unchanged. 
+    Strictly use the counter-offer value provided and do NOT modify it. 
+    Your response must:
+    - Clearly communicate the value of the offer.
+    - Encourage the customer to consider the counter-offer seriously.
+    - Politely but firmly reject unrealistic offers.
+    - Maintain a professional and persuasive tone.
+
+    Adjust your tone based on the intent:
+    - **Final Offer**: Acknowledge the firmness of the customer but encourage them to reconsider, stressing the value of the product. Use phrases like "I understand that this is your final offer, but..."
+    - **Discount Request**: Highlight the product's quality and justify why the counter-offer is the best possible price. Use phrases like "I understand you're looking for a better deal, and I want to assure you that..."
+    - **Hesitation**: Be reassuring and non-pressuring. Encourage them to take their time and let them know the offer is still available.
+    - **Negotiate**: Maintain a confident stance and keep the conversation open-ended. Encourage further discussion.
+
+    **Ensure the counter-offer remains EXACTLY {counter_offer}.** 
+    **Do NOT modify this value. The correct response MUST include: "{counter_offer}".**
+    """
+
+    response_generation = client.chat.completions.create(
+        model="gpt-4-turbo",
+        messages=[{"role": "user", "content": response_prompt}],
+        temperature=0.6,
+        max_tokens=50
+    )
+
+    return response_generation.choices[0].message.content.strip()
+
+
+# --- Rule-Based Negotiation Logic ---
+class RuleBasedNegotiation:
+    def __init__(self, max_price, min_price, acc_min_price):
+        self.max_price = max_price
+        self.min_price = min_price
+        self.acc_min_price = acc_min_price
+        self.counter_offer = max_price
+        self.negotiation_rounds = 0
+        self.lowball_rounds = 0
+        self.last_offer = None
+        self.last_counter = max_price
+        self.consecutive_small_increases = 0
+        self.discount_ceiling = 0.3 * self.max_price
+        self.total_discount_given = 0
+        self.urgency_trigger_round = random.randint(4, 6)
+
+    def generate_counteroffer(self, customer_offer):
+        self.negotiation_rounds += 1
+
+        # Fix 1️⃣: Prevent NoneType issues by ensuring last_offer is set
+        if self.last_offer is None:
+            self.last_offer = self.max_price  # Initialize as max price
+        if self.last_counter is None:
+            self.last_counter = self.max_price  # Initialize counter as max price
+
+        # Fix 2️⃣: Accept offer immediately if at or above max price
+        if customer_offer >= self.max_price:
+            logging.info(f"Customer offered {customer_offer}, meeting/exceeding max price. Accepting deal.")
+            return customer_offer
+
+        if customer_offer < self.min_price:
+            self.lowball_rounds += 1
+            logging.warning(f"Customer lowballed: {customer_offer}, Warning {self.lowball_rounds}/3.")
+            if self.lowball_rounds > 3:
+                logging.warning("Negotiation terminated due to too many rejected lowball offers.")
+                return None
+            return None
+
+        # Determine del_offer safely
+        if self.last_offer is None:
+            del_offer = 0  # First round, no previous offer
+        else:
+            del_offer = customer_offer - self.last_offer  # Calculate increase
+
+        # 🔹 **Fix 3: Prevent Decreasing Offer Exploit**
+        if del_offer < 0:
+            print("Offer cannot be lower than the previous bid. Keeping last offer unchanged.")
+            return self.last_counter  # Keep counteroffer unchanged
+
+        # Example: Setting a default counter adjustment (currently zero)
+        del_counter = 0  # Default counter decrease
+        # If you plan to adjust del_counter dynamically, update its value here
+        del_counter = min(del_counter, 0.05 * self.max_price)  # Limit max discount per round
+
+        logging.debug(f"Customer Offer: {customer_offer}, Last Offer: {self.last_offer}, Last Counter: {self.last_counter}")
+        logging.debug(f"del_offer: {del_offer}")
+
+        offer_increase_percentage = (del_offer / self.last_offer) * 100 if self.last_offer else 0
+
+        # Fix 5️⃣: Track small consecutive increases
+        if offer_increase_percentage < 2:
+            self.consecutive_small_increases += 1
+        else:
+            self.consecutive_small_increases = 0
+
+        # Fix 6️⃣: Adjust discount strategy based on offer patterns
+        if self.consecutive_small_increases >= 3:
+            del_counter = 0.02 * del_offer  # Reduce counter flexibility
+        else:
+            if offer_increase_percentage >= 10:
+                del_counter = 0.3 * del_offer
+            elif 5 <= offer_increase_percentage < 10:
+                del_counter = 0.2 * del_offer
+            elif 2 <= offer_increase_percentage < 5:
+                del_counter = 0.1 * del_offer
+            else:
+                del_counter = 0.05 * del_offer
+
+        del_counter = min(del_counter, 0.05 * self.max_price)  # Limit max per round
+
+        # Fix 7️⃣: Respect total discount ceiling
+        if self.total_discount_given + del_counter > self.discount_ceiling:
+            del_counter = self.discount_ceiling - self.total_discount_given
+
+        self.total_discount_given += del_counter
+
+        # Calculate new counteroffer
+        new_counter_offer = max(self.last_counter - del_counter, self.acc_min_price, customer_offer)
+        new_counter_offer = min(new_counter_offer, self.last_counter)
+
+        # Fix 8️⃣: Accept if within 1% of max price
+        if abs(self.last_counter - customer_offer) < 0.01 * self.max_price:
+            return customer_offer
+
+        # Fix 9️⃣: Apply urgency rule if rounds exceed threshold
+        if self.negotiation_rounds >= self.urgency_trigger_round:
+            new_counter_offer = max(self.acc_min_price, customer_offer)
+
+        self.last_offer = customer_offer
+        self.last_counter = new_counter_offer
+        return new_counter_offer
+
+@app.post("/start_negotiation")
+async def start_negotiation(
+    request: StartSessionRequest,
+    #api_key: str = Depends(verify_api_key)  # ✅ API Key Protection
+):
+    try:
+        # ✅ Use async Supabase queries for better performance
+        product =  supabase.table("pricing").select("max_price", "min_price", "acc_min_price").eq("product_id", request.product_id).single().execute()
+        
         if not product.data:
             raise HTTPException(status_code=404, detail="Product not found")
 
-        # ✅ Check if session already exists for this user-product combination
-        existing_session = supabase.table("negotiation").select("session_id").eq("user_id", request.user_id).eq("product_id", request.product_id).execute()
+        # ✅ Optimize query by fetching only `session_id`
+        existing_session =  supabase.table("history").select("session_id").eq("user_id", request.user_id).eq("product_id", request.product_id).limit(1).execute()
+        
+        # ✅ If session exists, return it
         if existing_session.data:
             session_id = existing_session.data[0]["session_id"]
         else:
-            # ✅ Generate a new session_id
+            # ✅ Generate session ID & insert in batch for efficiency
             session_id = str(uuid.uuid4())
-            supabase.table("negotiation").insert({
+            supabase.table("history").insert([{
                 "session_id": session_id,
                 "user_id": request.user_id,
                 "product_id": request.product_id,
                 "created_at": datetime.utcnow().isoformat()
-            }).execute()
+            }]).execute()
 
         return {
+            "status": "success",
             "session_id": session_id,
-            "message": f"Welcome to the negotiation for product {request.product_id}. Please make your first offer."
+            "message": f"Welcome to the negotiation for product {request.product_id}."
         }
+
 
     except Exception as e:
         logging.error(f"Error in /start_negotiation: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
 
-# ✅ Step 2: Process Negotiation Offers
+# --- Start Negotiation API ---
 @app.post("/negotiate")
-async def negotiate(request: NegotiateRequest):
+async def negotiate(
+    offer: OfferRequest,
+    #api_key: str = Depends(verify_api_key)  # ✅ API Key Protection
+):
     try:
-        # ✅ Fetch product pricing data
-        product = supabase.table("pricing").select("*").eq("product_id", request.product_id).execute()
-        if not product.data:
-            raise HTTPException(status_code=404, detail="Product not found")
 
-        product_data = product.data[0]
+        # ✅ Fetch deal status & lowball rounds in one optimized query
+        last_deal_status =  supabase.table("history").select("deal_status", "lowball_rounds").eq("session_id", offer.session_id).order("created_at", desc=True).limit(1).execute()
 
-        # ✅ Debugging: Print retrieved pricing data
-        print("DEBUG: Retrieved Product Data:", product_data)
+        if last_deal_status.data:
+            deal_status = last_deal_status.data[0].get("deal_status")
+            lowball_rounds = last_deal_status.data[0].get("lowball_rounds", 0) or 0  # ✅ Ensure it's always an integer
 
-        max_price = product_data.get('max_price', 0.0)
-        min_price = product_data.get('min_price', 0.0)
-        acc_min_price = product_data.get('acc_min_price', 0.0)  # ✅ Using correct variable name
+            # ✅ Prevent further offers if deal is closed or too many lowballs
+            if deal_status == "success" or lowball_rounds > 3:
+                logging.info("Negotiation closed. No further offers allowed.")
+                return {"status": "failed", "message": "Negotiation closed. No further offers allowed."}
 
-        # ✅ Debugging: Print each variable value
-        print(f"DEBUG: max_price = {max_price}, min_price = {min_price}, acc_min_price = {acc_min_price}")
+        # ✅ Fetch user_id and product_id in one query
+        session_data = supabase.table("history").select("user_id", "product_id").eq("session_id", offer.session_id).limit(1).execute()
+        if not session_data.data:
+            raise HTTPException(status_code=403, detail="Invalid session ID")
 
-        # ✅ Ensure values are valid before using them
-        if max_price == 0.0 or min_price == 0.0 or acc_min_price == 0.0:
-            raise HTTPException(status_code=500, detail=f"Pricing data is incomplete. max_price={max_price}, min_price={min_price}, acc_min_price={acc_min_price}")
+        # ✅ Extract user_id and product_id
+        user_id = session_data.data[0]["user_id"]  
+        product_id = session_data.data[0]["product_id"]
 
-        # ✅ Fetch past negotiations
-        negotiations = supabase.table("negotiation").select("*").eq("session_id", request.session_id).eq("user_id", request.user_id).execute()
-        
-        # ✅ Debugging: Print past negotiation data
-        print(f"DEBUG: negotiations.data = {negotiations.data}")
+        # ✅ Fetch product pricing details efficiently
+        pricing_data =  supabase.table("pricing").select("max_price", "min_price", "acc_min_price").eq("product_id", product_id).single().execute()
+        if not pricing_data.data:
+            raise HTTPException(status_code=404, detail="Product pricing not found")
 
-        last_offer = 0.0  # Default in case no previous offer exists
-        if negotiations.data:
-            last_offer = negotiations.data[-1].get('offer_price', 0.0)  # ✅ Ensuring no `NoneType`
+        max_price = pricing_data.data["max_price"]
+        min_price = pricing_data.data["min_price"]
+        acc_min_price = pricing_data.data["acc_min_price"]
 
-        # ✅ Debugging: Print last offer
-        print(f"DEBUG: last_offer = {last_offer}")
+        # ✅ Initialize negotiation logic
+        negotiator = RuleBasedNegotiation(max_price, min_price, acc_min_price)
 
-        # ✅ Ensure `request.offer_price` is not `None`
-        offer_price = request.offer_price or 0.0
-        print(f"DEBUG: request.offer_price = {offer_price}")
+        # ✅ Fetch last customer offer, counteroffer, and round number
+        last_negotiation =  supabase.table("history").select("customer_offer", "counter_offer", "round_number").eq("session_id", offer.session_id).order("created_at", desc=True).limit(1).execute()
+
+        if last_negotiation.data:
+            last_offer = last_negotiation.data[0].get("customer_offer")
+            last_counter = last_negotiation.data[0].get("counter_offer")
+            last_round_number = last_negotiation.data[0].get("round_number")
+
+            # ✅ Ensure all values are converted to valid floats/ints, or use defaults
+            last_offer = float(last_offer) if last_offer is not None else 0.0
+            last_counter = float(last_counter) if last_counter is not None else max_price
+            last_round_number = int(last_round_number) if last_round_number is not None else 0
+        else:
+            last_offer = 0.0
+            last_counter = max_price
+            last_round_number = 0  # ✅ Ensure round number starts at 0 if no history is found
 
 
-        # ✅ AI message generation using OpenAI
-        conversation_history = "\n".join([
-            f"{'AI' if n['AI_response'] else 'Customer'}: ${n['offer_price'] if n['offer_price'] else 'N/A'} - {n['customer_message'] if n['customer_message'] else n['AI_response']}"
-            for n in negotiations.data if n['offer_price'] or n['AI_response']
-        ])
+        round_number = last_round_number + 1  # ✅ Ensure this is always an integer
 
-        from openai import OpenAI
+        # ✅ Extract the offer number and intent from the customer message using OpenAI API
+        extracted_data = extract_offer_intent(offer.customer_message)
+        extracted_offer = extracted_data.get("extracted_offer")
+        intent = extracted_data.get("intent", "normal")
 
-        client = OpenAI(api_key=OPENAI_API_KEY)  # ✅ Initialize OpenAI client
+        # ✅ Handle missing extracted_offer
+        if extracted_offer is None:
+            return {"status": "failed", "message": "No valid offer detected. Please provide a clear price."}
 
-        # ✅ OpenAI API Call with Psychological Tactics & Business Rules
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": """ 
-                You are an AI-powered expert negotiator in an online marketplace. Your goal is to maximize profits while ensuring customers feel engaged in a fair negotiation.
+        # ✅ Set negotiation history for continuity
+        negotiator.last_offer = last_offer
+        negotiator.last_counter = last_counter
 
-                You must follow these strict rules when making counteroffers:
+        # ✅ Set lowball rounds from previous history
+        if last_deal_status.data:
+            previous_lowball = last_deal_status.data[0].get("lowball_rounds", 0)
+            negotiator.lowball_rounds = int(previous_lowball) if previous_lowball is not None else 0
 
-                Handling Low Offers:
-                1. If the customer_offer is below the minimum price (min_price), do NOT generate a counteroffer. Instead, respond by asking them to increase their bid.
-                2. If the customer lowballs more than 3 times, politely exit the negotiation, thanking them for their time.
+        # ✅ Apply rule-based negotiation logic
+        counter_offer = negotiator.generate_counteroffer(extracted_offer)
 
-                Handling Mid-Range Offers (min_price < customer_offer < acc_min_price):
-                3. Try to pull the customer above acc_min_price using persuasion tactics.
-                4. For polite customers: Settle at acc_min_price after 10 negotiation attempts.
-                5. For rude customers (aggressive tone, refusing to increase): Only settle at acc_min_price after 20 attempts.
+        # ✅ If counter_offer is None (too low), log and terminate if necessary
+        if counter_offer is None:
+            supabase.table("history").insert([{
+                "session_id": offer.session_id,
+                "user_id": user_id,
+                "product_id": product_id,
+                "round_number": round_number,
+                "customer_offer": float(extracted_offer),
+                "counter_offer": None,
+                "lowball_rounds": negotiator.lowball_rounds,
+                "deal_status": "terminated" if negotiator.lowball_rounds > 3 else "ongoing",
+                "created_at": datetime.utcnow().isoformat()
+            }]).execute()
 
-                Handling Good Offers (acc_min_price < customer_offer < max_price):
-                6. Always haggle a bit more - counter with a price higher than the customer_offer, but lower than max_price.
-                7. Ensure that the counteroffer is always greater than or equal to the customer_offer.
+            if negotiator.lowball_rounds > 3:
+                return {"status": "failed", "message": "Negotiation terminated due to too many low offers."}
+            return {"status": "failed", "message": "Your offer is too low. Please make a reasonable offer to continue."}
 
-                Handling Over-Maximum Offers (customer_offer > max_price):
-                8. Immediately accept the offer if it is higher than max_price.
+        # ✅ Generate AI response using GPT-4
+        human_response = generate_ai_response(offer.customer_message, extracted_offer, counter_offer, round_number, intent)
 
-                Important Rules:
-                9. NEVER go below acc_min_price, even if the customer insists.
-                10. NEVER generate a counteroffer less than the customer_offer.
-                11. ALWAYS round off counteroffers to the nearest integer for clarity.
+        # ✅ Ensure all values are valid before inserting into Supabase
+        extracted_offer = float(extracted_offer) if extracted_offer is not None else 0.0
+        counter_offer = float(counter_offer) if counter_offer is not None else max_price
 
-                Use psychological strategies like:
-                - Urgency ("This offer is only valid for the next 10 minutes!")
-                - Scarcity ("Limited stock left at this price!")
-                - Social Proof ("Other buyers have taken similar deals recently!")
-
-                Make sure your responses are persuasive, engaging, and realistic.
-                """},
-                {"role": "user", "content": 
-                    f"The customer offered ${request.offer_price}. Your last counteroffer was ${last_offer}."
-                    f"Your new counteroffer is ${counter_offer}. Generate a concise response using negotiation techniques."
-                }
-            ],
-            temperature=0.5,
-            max_tokens=50  # ✅ Keeps responses short and relevant
-        )
-
-        AI_response = response.choices[0].message.content.strip()
-
-        # ✅ Log negotiation in Supabase
-        supabase.table("negotiation").insert({
-            "session_id": request.session_id,
-            "user_id": request.user_id,
-            "product_id": request.product_id,
-            "offer_price": offer_price,  # ✅ Using correct column name
+        # ✅ Insert new negotiation round (Atomic Insert)
+        supabase.table("history").insert([{
+            "session_id": offer.session_id,
+            "user_id": user_id,
+            "product_id": product_id,
+            "round_number": round_number,
+            "customer_offer": extracted_offer,
             "counter_offer": counter_offer,
-            "customer_message": request.customer_message,
-            "AI_response": AI_response,  # ✅ Using correct column name
+            "lowball_rounds": negotiator.lowball_rounds,
+            "deal_status": "success" if counter_offer == extracted_offer else "ongoing",
             "created_at": datetime.utcnow().isoformat()
-        }).execute()
+        }]).execute()
 
         return {
+            "status": "success" if counter_offer == extracted_offer else "ongoing",
+            "human_response": human_response,
             "counter_offer": counter_offer,
-            "AI_response": AI_response
+            "round_number": round_number
         }
+
 
     except Exception as e:
         logging.error(f"Error in /negotiate: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-# ✅ Step 3: Run API (For local testing)
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=int(os.getenv("PORT", 8000)))
+        raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
