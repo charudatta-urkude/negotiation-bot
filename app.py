@@ -44,6 +44,18 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # ✅ Cache Pricing Data
 pricing_cache = TTLCache(maxsize=100, ttl=600)
 
+from fastapi.middleware.cors import CORSMiddleware
+
+# ✅ Add this below FastAPI app initialization
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5174", "http://localhost:3000", "https://your-frontend-domain.com"],  # Replace with actual frontend domain
+    allow_credentials=True,
+    allow_methods=["*"],  # Allow all HTTP methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allow all headers
+)
+
+
 # ✅ API Response Standardization
 def create_response(status: str, message: str, data: dict = None):
     return {"status": status, "message": message, "data": data or {}}
