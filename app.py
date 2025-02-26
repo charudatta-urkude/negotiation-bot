@@ -109,11 +109,21 @@ Provide a structured JSON response:
     return result
 
 # --- ✅ AI-Generated Human-Like Response ---
-def generate_ai_response(customer_message: str, extracted_offer: float, counter_offer: float, round_number: int, intent: str) -> str:
+def generate_ai_response(customer_message: str, extracted_offer: float, counter_offer: float, round_number: int, intent: str, deal_status: str) -> str:
     """
-    Uses GPT-4-turbo to generate persuasive counter-offer responses.
-    Adjusts the response tone based on the extracted customer intent.
+    Uses GPT-4-turbo to generate different responses based on the negotiation status.
+    If the deal is struck (success) or fails (terminated), generate a corresponding AI message.
+    Otherwise, continue normal negotiation.
     """
+    
+    # Handle special deal cases
+    if deal_status == "success":
+        extra_instructions = "Generate a positive, congratulatory message confirming the deal at the agreed price."
+    elif deal_status == "terminated":
+        extra_instructions = "Generate a message expressing regret that the negotiation has failed."
+    else:
+        extra_instructions = "Your goal is to continue negotiating and provide a persuasive counteroffer."
+
     response_prompt = f"""
     Customer: "{customer_message}"
     Extracted Offer: {extracted_offer if extracted_offer else 'no offer'}
@@ -121,22 +131,13 @@ def generate_ai_response(customer_message: str, extracted_offer: float, counter_
     Intent: {intent}
     Current round is {round_number}
 
-    You are a negotiation assistant. Your goal is to respond in a way that aligns with the customer's intent while keeping the counter-offer unchanged. 
-    Strictly use the counter-offer value provided and do NOT modify it. 
-    Your response must:
-    - Clearly communicate the value of the offer.
-    - Encourage the customer to consider the counter-offer seriously.
-    - Politely but firmly reject unrealistic offers.
-    - Maintain a professional and persuasive tone.
+    {extra_instructions}
 
-    Adjust your tone based on the intent:
-    - **Final Offer**: Acknowledge the firmness of the customer but encourage them to reconsider, stressing the value of the product. Use phrases like "I understand that this is your final offer, but..."
-    - **Discount Request**: Highlight the product's quality and justify why the counter-offer is the best possible price. Use phrases like "I understand you're looking for a better deal, and I want to assure you that..."
-    - **Hesitation**: Be reassuring and non-pressuring. Encourage them to take their time and let them know the offer is still available.
-    - **Negotiate**: Maintain a confident stance and keep the conversation open-ended. Encourage further discussion.
-
-    **Ensure the counter-offer remains EXACTLY {counter_offer}.** 
-    **Do NOT modify this value. The correct response MUST include: "{counter_offer}".**
+    STRICT RULES:
+    - If the deal is SUCCESS, create a cheerful and professional congratulatory message.
+    - If the deal is TERMINATED, create a polite but firm regret message.
+    - If negotiation is ONGOING, follow regular negotiation tactics.
+    - Never modify the counter-offer price. The correct response MUST include: "{counter_offer}".
     """
 
     response_generation = client.chat.completions.create(
@@ -147,6 +148,7 @@ def generate_ai_response(customer_message: str, extracted_offer: float, counter_
     )
 
     return response_generation.choices[0].message.content.strip()
+
 
 
 # --- Rule-Based Negotiation Logic ---
@@ -201,7 +203,7 @@ class RuleBasedNegotiation:
         # Example: Setting a default counter adjustment (currently zero)
         del_counter = 0  # Default counter decrease
         # If you plan to adjust del_counter dynamically, update its value here
-        del_counter = min(del_counter, 0.05 * self.max_price)  # Limit max discount per round
+        #del_counter = min(del_counter, 0.05 * self.max_price)  # Limit max discount per round
 
         logging.debug(f"Customer Offer: {customer_offer}, Last Offer: {self.last_offer}, Last Counter: {self.last_counter}")
         logging.debug(f"del_offer: {del_offer}")
@@ -238,14 +240,17 @@ class RuleBasedNegotiation:
         # Calculate new counteroffer
         new_counter_offer = max(self.last_counter - del_counter, self.acc_min_price, customer_offer)
         new_counter_offer = min(new_counter_offer, self.last_counter)
+        new_counter_offer = round(new_counter_offer, 1)
 
         # Fix 8️⃣: Accept if within 1% of max price
         if abs(self.last_counter - customer_offer) < 0.01 * self.max_price:
             return customer_offer
 
         # Fix 9️⃣: Apply urgency rule if rounds exceed threshold
-        if self.negotiation_rounds >= self.urgency_trigger_round:
-            new_counter_offer = max(self.acc_min_price, customer_offer)
+        if self.negotiation_rounds >= self.urgency_trigger_round and self.consecutive_small_increases < 2:
+            urgency_adjustment = (self.last_counter - self.acc_min_price) * 0.3  # Reduce counteroffer by 50% toward min price
+            new_counter_offer = max(self.acc_min_price, customer_offer, self.last_counter - urgency_adjustment)
+        # Offer the lowest acceptable price
 
         self.last_offer = customer_offer
         self.last_counter = new_counter_offer
@@ -280,7 +285,6 @@ async def start_negotiation(
             }]).execute()
 
         return {
-            "status": "success",
             "session_id": session_id,
             "message": f"Welcome to the negotiation for product {request.product_id}."
         }
@@ -391,7 +395,7 @@ async def negotiate(
             return {"status": "failed", "message": "Your offer is too low. Please make a reasonable offer to continue."}
 
         # ✅ Generate AI response using GPT-4
-        human_response = generate_ai_response(offer.customer_message, extracted_offer, counter_offer, round_number, intent)
+        human_response = generate_ai_response(offer.customer_message, extracted_offer, counter_offer, round_number, intent, deal_status)
 
         # ✅ Ensure all values are valid before inserting into Supabase
         extracted_offer = float(extracted_offer) if extracted_offer is not None else 0.0
