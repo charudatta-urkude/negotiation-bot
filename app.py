@@ -13,6 +13,7 @@ import openai
 import json
 from cachetools import TTLCache
 from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional
 
 # --- Environment Setup & Global Configurations ---
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-3.5-turbo")  # Change to "gpt-4-turbo" if needed
@@ -58,7 +59,13 @@ class StartSessionRequest(BaseModel):
 class OfferRequest(BaseModel):
     session_id: str
     customer_message: str
+    decision: Optional[str] = None  # Optional field to capture final decision ("deal" or "no_deal")
 
+'''
+class DealDecisionRequest(BaseModel):
+    session_id: str
+    decision: str  # "deal" or "no_deal"
+'''
 # --- Helper: Run Supabase Query ---
 async def run_query(query_lambda):
     return await asyncio.to_thread(query_lambda)
@@ -241,8 +248,13 @@ class RuleBasedNegotiation:
         else:
             self.consecutive_small_increases = 0
 
+        # Increase concession rate further for multiple repetitions.
         if self.consecutive_small_increases >= 3:
-            del_counter = 0.02 * del_offer
+            computed_discount = 0.02 * del_offer + 0.02 * (self.consecutive_small_increases - 2) * del_offer
+            # Define a minimal discount as 1% of the last counteroffer as a fallback
+            minimum_discount = 0.01 * self.last_counter
+            del_counter = max(computed_discount, minimum_discount)
+
         else:
             if offer_increase_percentage >= 10:
                 del_counter = 0.4 * del_offer
@@ -265,9 +277,9 @@ class RuleBasedNegotiation:
         if abs(self.last_counter - customer_offer) < 0.01 * self.max_price:
             return customer_offer
 
-        if self.negotiation_rounds >= self.urgency_trigger_round and self.consecutive_small_increases < 2:
-            urgency_adjustment = (self.last_counter - self.acc_min_price) * 0.3
-            new_counter_offer = max(self.acc_min_price, customer_offer, self.last_counter - urgency_adjustment)
+        # If customer is stuck (repeating the same offer) for 5 or more rounds, return final decision.
+        if self.consecutive_small_increases >= 5:
+            return "final_decision"
 
         self.last_offer = customer_offer
         self.last_counter = new_counter_offer
@@ -342,8 +354,9 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
         
         negotiator = RuleBasedNegotiation(max_price, min_price, acc_min_price)
         
+        # Persist consecutive_small_increases from previous round if available.
         last_negotiation = await run_query(lambda: supabase.table("history")
-                                             .select("customer_offer", "counter_offer", "round_number")
+                                             .select("customer_offer", "counter_offer", "round_number", "consecutive_small_increases")
                                              .eq("session_id", offer.session_id)
                                              .order("created_at", desc=True)
                                              .limit(1).execute())
@@ -351,10 +364,12 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             last_offer = float(last_negotiation.data[0].get("customer_offer") or 0.0)
             last_counter = float(last_negotiation.data[0].get("counter_offer") or max_price)
             last_round_number = int(last_negotiation.data[0].get("round_number") or 0)
+            prev_consec = int(last_negotiation.data[0].get("consecutive_small_increases") or 0)
         else:
             last_offer = 0.0
             last_counter = max_price
             last_round_number = 0
+            prev_consec = 0
         
         round_number = last_round_number + 1
         
@@ -374,7 +389,8 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 "round_number": round_number,
                 "customer_offer": 0,
                 "counter_offer": last_counter,
-                "lowball_rounds": negotiator.lowball_rounds,
+                "lowball_rounds": 0,
+                "consecutive_small_increases": prev_consec,
                 "deal_status": "pending",
                 "intent": intent,
                 "customer_message": offer.customer_message,
@@ -389,8 +405,10 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 "round_number": round_number
             }
         
+        # Persist previous value of consecutive_small_increases
         negotiator.last_offer = last_offer
         negotiator.last_counter = last_counter
+        negotiator.consecutive_small_increases = prev_consec
         
         if last_deal_status.data:
             previous_lowball = last_deal_status.data[0].get("lowball_rounds", 0)
@@ -398,6 +416,44 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
         
         counter_offer = negotiator.generate_counteroffer(extracted_offer)
         
+        if counter_offer == "final_decision":
+            # If the customer has provided a decision in the payload, use it.
+            if offer.decision and offer.decision in ["deal", "no_deal"]:
+                if offer.decision == "deal":
+                    final_message = f"Great! The deal is locked in at {negotiator.last_counter}. Thank you for negotiating!"
+                    final_status = "success"
+                else:
+                    final_message = "No deal made. Thank you for trying, maybe next time!"
+                    final_status = "failed"
+                await run_query(lambda: supabase.table("history").insert([{
+                    "session_id": offer.session_id,
+                    "user_id": user_id,
+                    "product_id": product_id,
+                    "round_number": round_number,
+                    "customer_offer": float(extracted_offer),
+                    "counter_offer": negotiator.last_counter,
+                    "lowball_rounds": negotiator.lowball_rounds,
+                    "deal_status": final_status,
+                    "intent": intent,
+                    "customer_message": offer.customer_message,
+                    "ai_response": final_message,
+                    "consecutive_small_increases": negotiator.consecutive_small_increases,
+                    "created_at": datetime.utcnow().isoformat()
+                }]).execute())
+                return {
+                    "status": final_status,
+                    "human_response": final_message,
+                    "counter_offer": negotiator.last_counter,
+                    "round_number": round_number
+                }
+            else:
+                # Return final decision state to frontend so that deal/no deal buttons can be displayed.
+                return {
+                    "status": "final_decision",
+                    "message": f"My final offer is {negotiator.last_counter}. Would you like to secure the deal?",
+                    "counter_offer": negotiator.last_counter
+                }
+
         if counter_offer is None:
             insert_response = await run_query(lambda: supabase.table("history").insert([{
                 "session_id": offer.session_id,
@@ -407,6 +463,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 "customer_offer": float(extracted_offer),
                 "counter_offer": None,
                 "lowball_rounds": negotiator.lowball_rounds,
+                "consecutive_small_increases": negotiator.consecutive_small_increases,
                 "deal_status": "terminated" if negotiator.lowball_rounds > 3 else "ongoing",
                 "intent": intent,
                 "customer_message": offer.customer_message,
@@ -418,10 +475,9 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 return {"status": "failed", "message": "Negotiation terminated due to too many low offers."}
             return {"status": "failed", "message": "Your offer is too low. Please make a reasonable offer to continue."}
         
-        # If the customer's offer is within 2% of the last counter, mark as success.
         if (abs(last_counter - extracted_offer) / last_counter) <= 0.02:
             deal_status_computed = "success"
-            counter_offer = extracted_offer  # Ensure counteroffer equals the accepted offer
+            counter_offer = extracted_offer
             human_response = f"Great! We have a deal at {counter_offer}. Looking forward to doing business with you!"
         else:
             deal_status_computed = "ongoing"
@@ -440,6 +496,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             "customer_offer": extracted_offer,
             "counter_offer": counter_offer,
             "lowball_rounds": negotiator.lowball_rounds,
+            "consecutive_small_increases": negotiator.consecutive_small_increases,
             "deal_status": deal_status_computed,
             "intent": intent,
             "customer_message": offer.customer_message,
@@ -458,3 +515,11 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
     except Exception as e:
         logging.error(f"Error in /negotiate: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
+'''
+@app.post("/deal_decision")
+async def deal_decision(request: DealDecisionRequest):
+    if request.decision == "deal":
+        return {"message": "Great! The deal is locked in. Thank you for negotiating!"}
+    else:
+        return {"message": "No deal made. Thank you for trying, maybe next  time!"}
+'''
