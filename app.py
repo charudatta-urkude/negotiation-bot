@@ -203,7 +203,7 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
     response_generation = await run_query(lambda: client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        temperature=0.65,
+        temperature=0.7,
         max_tokens=MAX_TOKENS
     ))
     result = response_generation.choices[0].message.content.strip()
