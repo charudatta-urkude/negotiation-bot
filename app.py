@@ -37,13 +37,14 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 pricing_cache = TTLCache(maxsize=100, ttl=600)
 response_cache = TTLCache(maxsize=100, ttl=300)
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5174",
         "http://localhost:5173",
         "http://localhost:3000",
-        "https://ai-negotiation-jqzi.vercel.app/"
+        "https://ai-negotiation-jqzi.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
