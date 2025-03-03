@@ -4,7 +4,6 @@ import random
 import logging
 import asyncio
 import time
-import math  # For mathematical functions
 from fastapi import FastAPI, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 from supabase import create_client, Client
@@ -143,7 +142,6 @@ Replace null with the numerical offer if found, and "other" with the appropriate
         logging.error(f"Error in extracting intent/offer: {e}")
         result = {"extracted_offer": None, "intent": "other"}
     return result
-
 async def generate_ai_response_async(customer_message: str, extracted_offer: float, counter_offer: float, round_number: int, intent: str, deal_status: str, conversation_history: List[Dict[str, str]] = None) -> str:
     cache_key = f"{customer_message}-{extracted_offer}-{counter_offer}-{round_number}-{intent}-{deal_status}"
     if cache_key in response_cache:
@@ -171,11 +169,35 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
                 "Generate a natural, varied response to continue the negotiation. Include the counter-offer exactly as provided."
             )
     
+    # Build initial messages with context
     messages = [{"role": "system", "content": "You are a negotiation bot that maintains context across multiple turns."}]
     if conversation_history:
         messages.extend(conversation_history)
-    messages.append({"role": "user", "content": f"Round {round_number}: {customer_message}"})
-    messages.append({"role": "user", "content": f"Extracted Offer: {'no offer' if not extracted_offer else extracted_offer}, Counter Offer: {counter_offer}, Intent: {intent}. Instructions: {extra_instructions}"})
+    
+    # Create the response prompt with strict instructions
+    response_prompt = f"""
+You are a negotiation bot. Based on the following context, generate a final, humanlike response in a friendly and conversational tone.
+Avoid repeating fixed templates or phrases. Use diverse language while ensuring the counter-offer value remains exactly as: "{counter_offer}".
+The response must be complete within 50 tokens.
+
+Customer Message: "{customer_message}"
+Extracted Offer: {"no offer" if not extracted_offer else extracted_offer}
+Counter Offer: {counter_offer}
+Intent: {intent}
+Round: {round_number}
+
+Instructions: {extra_instructions}
+
+***STRICT RULES:
+- The response must be complete within 50 tokens.
+- Use friendly, conversational language.
+- The response MUST include the counter-offer: "{counter_offer}".
+- Your final response must explicitly mention the counter-offer value exactly as: "{counter_offer}". Do not change this number.
+- DO NOT GENERATE YOUR OWN OFFER. DO NOT GIVE ANY OFFER OTHER THAN THE COUNTER OFFER: "{counter_offer}" ***
+
+Final Response:
+"""
+    messages.append({"role": "user", "content": response_prompt})
     
     response_generation = await run_query(lambda: client.chat.completions.create(
         model=MODEL_NAME,
@@ -186,6 +208,7 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
     result = response_generation.choices[0].message.content.strip()
     response_cache[cache_key] = result
     return result
+
 
 # --- Rule-Based Negotiation Logic ---
 class RuleBasedNegotiation:
