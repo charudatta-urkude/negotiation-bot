@@ -155,15 +155,15 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
     else:
         if intent == "final_offer":
             extra_instructions = (
-                "Generate a response that acknowledges the customer's final offer using varied language. Incorporate the counter-offer exactly as given."
+                "Acknowledge the customer's final offer in a friendly manner, and clearly include the counter-offer exactly as provided."
             )
         elif intent == "discount_request":
             extra_instructions = (
-                "Generate a conversational response that explains your counteroffer in a friendly manner, including the counter-offer exactly as provided."
+                "Explain your counteroffer with a light-hearted tone, include the counter-offer exactly as provided, and add a touch of humor."
             )
         elif intent == "hesitation":
             extra_instructions = (
-                "Generate a warm and empathetic response that addresses the customer's hesitation. Include the counter-offer exactly as provided."
+                "Address the customer's hesitation warmly and humorously, and include the counter-offer exactly as provided."
             )
         else:
             extra_instructions = (
@@ -177,33 +177,33 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
     
     # Create the response prompt with strict instructions
     response_prompt = f"""
-You are a negotiation bot. Based on the following context, generate a final, humanlike response in a friendly and conversational tone.
-Avoid repeating fixed templates or phrases. Use diverse language while ensuring the counter-offer value remains exactly as: "{counter_offer}".
-The response must be complete within 50 tokens.
+            You are a negotiation bot. Based on the following context, generate a final, humanlike response in a casual, friendly, and humorous tone.
+            Avoid repeating fixed templates or phrases. Use diverse and witty language while ensuring the counter-offer value remains exactly as: "{counter_offer}".
+            The response must be complete within 50 tokens.
 
-Customer Message: "{customer_message}"
-Extracted Offer: {"no offer" if not extracted_offer else extracted_offer}
-Counter Offer: {counter_offer}
-Intent: {intent}
-Round: {round_number}
+            Customer Message: "{customer_message}"
+            Extracted Offer: {"no offer" if not extracted_offer else extracted_offer}
+            Counter Offer: {counter_offer}
+            Intent: {intent}
+            Round: {round_number}
 
-Instructions: {extra_instructions}
+            Instructions: {extra_instructions}
 
-***STRICT RULES:
-- The response must be complete within 50 tokens.
-- Use friendly, conversational language.
-- The response MUST include the counter-offer: "{counter_offer}".
-- Your final response must explicitly mention the counter-offer value exactly as: "{counter_offer}". Do not change this number.
-- DO NOT GENERATE YOUR OWN OFFER. DO NOT GIVE ANY OFFER OTHER THAN THE COUNTER OFFER: "{counter_offer}" ***
+            ***STRICT RULES:
+            - The response must be complete within 50 tokens.
+            - Use friendly, conversational, humorous, witty language.
+            - The response MUST include the counter-offer: "{counter_offer}".
+            - Your final response must explicitly mention the counter-offer value exactly as: "{counter_offer}". Do not change this number.
+            - DO NOT GENERATE YOUR OWN OFFER. DO NOT GIVE ANY OFFER OTHER THAN THE COUNTER OFFER: "{counter_offer}" ***
 
-Final Response:
-"""
+            Final Response:
+            """
     messages.append({"role": "user", "content": response_prompt})
     
     response_generation = await run_query(lambda: client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        temperature=0.6,
+        temperature=0.7,
         max_tokens=MAX_TOKENS
     ))
     result = response_generation.choices[0].message.content.strip()
@@ -258,7 +258,7 @@ class RuleBasedNegotiation:
         else:
             self.consecutive_small_increases = 0
 
-        if self.consecutive_small_increases >= 3:
+        if self.consecutive_small_increases >= 2:
             computed_discount = 0.02 * del_offer + 0.02 * (self.consecutive_small_increases - 2) * del_offer
             minimum_discount = 0.01 * self.last_counter
             del_counter = max(computed_discount, minimum_discount)
@@ -284,7 +284,7 @@ class RuleBasedNegotiation:
         if abs(self.last_counter - customer_offer) < 0.01 * self.max_price:
             return customer_offer
 
-        if self.consecutive_small_increases >= 5:
+        if self.consecutive_small_increases >= 4:
             return "final_decision"
 
         self.last_offer = customer_offer
