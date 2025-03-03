@@ -159,11 +159,11 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
             )
         elif intent == "discount_request":
             extra_instructions = (
-                "Explain your counteroffer with a light-hearted tone, include the counter-offer exactly as provided, and add a touch of humor."
+                "Explain your counteroffer with a light-hearted tone, include the counter-offer exactly as provided."
             )
         elif intent == "hesitation":
             extra_instructions = (
-                "Address the customer's hesitation warmly and humorously, and include the counter-offer exactly as provided."
+                "Address the customer's hesitation warmly and casually, and include the counter-offer exactly as provided."
             )
         else:
             extra_instructions = (
@@ -177,7 +177,7 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
     
     # Create the response prompt with strict instructions
     response_prompt = f"""
-            You are a negotiation bot. Based on the following context, generate a final, humanlike response in a casual, friendly, and humorous tone.
+            You are a negotiation bot. Based on the following context, generate a final, humanlike response in a casual, friendly tone.
             Avoid repeating fixed templates or phrases. Use diverse and witty language while ensuring the counter-offer value remains exactly as: "{counter_offer}".
             The response must be complete within 50 tokens.
 
@@ -191,7 +191,7 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
 
             ***STRICT RULES:
             - The response must be complete within 50 tokens.
-            - Use friendly, conversational, humorous, witty language.
+            - Use friendly, conversational, witty language, but don't overdo it. speak like a human
             - The response MUST include the counter-offer: "{counter_offer}".
             - Your final response must explicitly mention the counter-offer value exactly as: "{counter_offer}". Do not change this number.
             - DO NOT GENERATE YOUR OWN OFFER. DO NOT GIVE ANY OFFER OTHER THAN THE COUNTER OFFER: "{counter_offer}" ***
@@ -203,7 +203,7 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
     response_generation = await run_query(lambda: client.chat.completions.create(
         model=MODEL_NAME,
         messages=messages,
-        temperature=0.7,
+        temperature=0.6,
         max_tokens=MAX_TOKENS
     ))
     result = response_generation.choices[0].message.content.strip()
