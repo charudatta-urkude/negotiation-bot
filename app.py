@@ -424,7 +424,23 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
 
         # [MODIFICATION 2]: Check for affirmative responses using the intent from extraction.
         if intent == "affirmative" and (extracted_offer is None or extracted_offer == 0):
-            return {"status": "final_decision", "message": f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?", "counter_offer": last_counter}
+            human_response = f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?"
+            await run_query(lambda: supabase.table("history").insert([{
+                    "session_id": offer.session_id,
+                    "user_id": user_id,
+                    "product_id": product_id,
+                    "round_number": round_number,
+                    "customer_offer": 0,
+                    "counter_offer": last_counter,
+                    "lowball_rounds": negotiator.lowball_rounds,
+                    "consecutive_small_increases": negotiator.consecutive_small_increases,
+                    "deal_status": "final_decision",
+                    "intent": intent,
+                    "customer_message": offer.customer_message,
+                    "ai_response": human_response,
+                    "created_at": datetime.utcnow().isoformat()
+                }]).execute())
+            return {"status": "final_decision", "message": human_response, "counter_offer": last_counter}
 
 
         if extracted_offer is None or extracted_offer == 0:
