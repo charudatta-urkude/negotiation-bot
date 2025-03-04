@@ -117,18 +117,31 @@ async def extract_offer_intent_async(customer_message: str) -> dict:
 Extract the numerical offer and negotiation intent from the following message:
 - Customer message: "{customer_message}"
 
+If the customer's message consists solely of affirmative words (e.g., "yes", "okay", "sure", "I agree") and does not contain any numerical value, then return the intent as "affirmative" and the extracted_offer as null.
+
 Use the following guidelines:
 1. "final_offer": Use this if the customer states a definitive price and indicates that it is final (e.g., "My final offer is 850").
 2. "discount_request": Use this if the customer explicitly asks for a discount.
-3. "hesitation": Use this if the customer shows uncertainty or hesitation.
-4. "affirmative": Use this if the customer responds affirmatively (e.g., "yes", "okay", "sure", "I agree") without mentioning a number.
+3. "hesitation": Use this if the customer shows uncertainty or hesitation (e.g., "I'm not sure", "Let me think").
+4. "affirmative": Use this if the customer agrees to the last counter-offer without specifying a new number. Examples:
+    - "Yes"
+    - "Okay"
+    - "Sure"
+    - "I agree"
+    - "Let's go with this"
+    - "I'll take it"
+    - similar affirmative words
 5. "negotiate": Use this if the customer is open to further discussion (e.g., "Can I get it at 800?").
 6. "other": Use this if none of the above apply.
 
 Return a valid JSON object exactly in the following format:
-{{"extracted_offer": null, "intent": "other"}}
-Replace null with the numerical offer if found, and "other" with the appropriate intent.
-    """
+{{
+    "extracted_offer": null,
+    "intent": "other"
+}}
+Replace null with the numerical offer if found, and "other" with the detected intent.
+"""
+
     try:
         response = await run_query(lambda: client.completions.create(
             model="gpt-3.5-turbo-instruct",
@@ -143,6 +156,8 @@ Replace null with the numerical offer if found, and "other" with the appropriate
     except Exception as e:
         logging.error(f"Error in extracting intent/offer: {e}")
         result = {"extracted_offer": None, "intent": "other"}
+    
+    logging.info(f"Extracted intent: {result}")  # Log for debugging
     return result
 
 async def generate_ai_response_async(customer_message: str, extracted_offer: float, counter_offer: float, round_number: int, intent: str, deal_status: str, conversation_history: List[Dict[str, str]] = None) -> str:
