@@ -431,7 +431,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                     "product_id": product_id,
                     "round_number": round_number,
                     "customer_offer": 0,
-                    "counter_offer": last_counter,
+                    "counter_offer": "final_decision",  # Updated flag value
                     "lowball_rounds": negotiator.lowball_rounds,
                     "consecutive_small_increases": negotiator.consecutive_small_increases,
                     "deal_status": "final_decision",
@@ -440,14 +440,12 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                     "ai_response": human_response,
                     "created_at": datetime.utcnow().isoformat()
                 }]).execute())
-            return {"status": "final_decision", "message": human_response, "counter_offer": last_counter}
-
+            return {"status": "final_decision", "message": human_response, "counter_offer": "final_decision"}
 
         if extracted_offer is None or extracted_offer == 0:
             logging.info("Extracted offer is 0 or None, substituting with previous offer.")
             extracted_offer = last_offer
 
-        
         # Handle no numerical offer gracefully
         if extracted_offer is None:
             human_response = await generate_ai_response_async(
