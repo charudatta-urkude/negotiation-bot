@@ -292,10 +292,14 @@ class RuleBasedNegotiation:
             self.consecutive_small_increases = 0
 
         if self.consecutive_small_increases >= 2:
-            computed_discount = 0.02 * del_offer + 0.02 * (self.consecutive_small_increases - 2) * del_offer
-            disc_factor = random.uniform(0.007, 0.009)
-            minimum_discount = disc_factor * self.last_counter
-            del_counter = max(computed_discount, minimum_discount)
+            if del_offer == 0:
+                disc_factor = random.uniform(0.005, 0.007)
+                minimum_discount = disc_factor * self.last_counter
+                del_counter = minimum_discount
+            else:
+                computed_discount = 0.02 * del_offer + 0.02 * (self.consecutive_small_increases - 2) * del_offer
+                del_counter = computed_discount
+
         else:
             if offer_increase_percentage >= 10:
                 del_counter = 0.4 * del_offer
