@@ -368,13 +368,15 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                                              .eq("session_id", offer.session_id)
                                              .order("created_at", desc=True)
                                              .limit(1).execute())
-        if last_deal_status.data:
+                                             
+        if last_deal_status.data and not offer.decision:  # Only block if no new decision is provided
             deal_status = last_deal_status.data[0].get("deal_status")
             lowball_rounds = last_deal_status.data[0].get("lowball_rounds", 0) or 0
-            # [MODIFICATION 1]: Block further negotiation if final decision already made
-            if deal_status in ["success", "failed"] or lowball_rounds > 3:
+            # [MODIFICATION 1]: Block further negotiation if final decision already made (including "final_decision" state)
+            if deal_status in ["success", "failed", "final_decision"] or lowball_rounds > 3:
                 logging.info("Negotiation closed. No further offers allowed.")
                 return {"status": "failed", "message": "Negotiation closed. No further offers allowed."}
+
         
         session_data = await fetch_session_data(offer.session_id)
         if not session_data:
