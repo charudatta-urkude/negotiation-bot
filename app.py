@@ -368,15 +368,12 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                                              .eq("session_id", offer.session_id)
                                              .order("created_at", desc=True)
                                              .limit(1).execute())
-                                             
         if last_deal_status.data and not offer.decision:  # Only block if no new decision is provided
             deal_status = last_deal_status.data[0].get("deal_status")
             lowball_rounds = last_deal_status.data[0].get("lowball_rounds", 0) or 0
-            # [MODIFICATION 1]: Block further negotiation if final decision already made (including "final_decision" state)
             if deal_status in ["success", "failed", "final_decision"] or lowball_rounds > 3:
                 logging.info("Negotiation closed. No further offers allowed.")
                 return {"status": "failed", "message": "Negotiation closed. No further offers allowed."}
-
         
         session_data = await fetch_session_data(offer.session_id)
         if not session_data:
@@ -413,11 +410,35 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
 
         round_number = last_round_number + 1
 
+        # [NEW BLOCK] If a decision is provided, finalize immediately using last_counter.
+        if offer.decision and offer.decision in ["deal", "no_deal"]:
+            if offer.decision == "deal":
+                final_message = f"Great! The deal is locked in at {last_counter}. Thank you for negotiating!"
+                final_status = "success"
+            else:
+                final_message = "No deal made. Thank you for trying, maybe next time!"
+                final_status = "failed"
+            await run_query(lambda: supabase.table("history").insert([{
+                "session_id": offer.session_id,
+                "user_id": user_id,
+                "product_id": product_id,
+                "round_number": round_number,
+                "customer_offer": last_offer,
+                "counter_offer": last_counter,
+                "lowball_rounds": prev_consec,
+                "consecutive_small_increases": prev_consec,
+                "deal_status": final_status,
+                "intent": "final_decision",
+                "customer_message": offer.customer_message,
+                "ai_response": final_message,
+                "created_at": datetime.utcnow().isoformat()
+            }]).execute())
+            return {"status": final_status, "human_response": final_message, "counter_offer": last_counter, "round_number": round_number}
+
         extracted_data = await extract_offer_intent_async(offer.customer_message)
         extracted_offer = extracted_data.get("extracted_offer")
         intent = extracted_data.get("intent", "normal")
 
-        # Convert extracted_offer to float if it's not None
         try:
             extracted_offer = float(extracted_offer) if extracted_offer is not None else None
         except ValueError:
@@ -427,13 +448,14 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
         # [MODIFICATION 2]: Check for affirmative responses using the intent from extraction.
         if intent == "affirmative" and (extracted_offer is None or extracted_offer == 0):
             human_response = f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?"
+            counter_offer = "final_decision"
             await run_query(lambda: supabase.table("history").insert([{
                     "session_id": offer.session_id,
                     "user_id": user_id,
                     "product_id": product_id,
                     "round_number": round_number,
                     "customer_offer": 0,
-                    "counter_offer": "final_decision",  # Updated flag value
+                    "counter_offer": last_counter,  # Updated flag value
                     "lowball_rounds": negotiator.lowball_rounds,
                     "consecutive_small_increases": negotiator.consecutive_small_increases,
                     "deal_status": "final_decision",
@@ -448,7 +470,6 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             logging.info("Extracted offer is 0 or None, substituting with previous offer.")
             extracted_offer = last_offer
 
-        # Handle no numerical offer gracefully
         if extracted_offer is None:
             human_response = await generate_ai_response_async(
                 offer.customer_message, 0, last_counter, round_number, intent, "pending", conversation_history
@@ -470,7 +491,6 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             }]).execute())
             return {"status": "pending", "human_response": human_response, "counter_offer": last_counter, "round_number": round_number}
 
-        # Persist previous value of consecutive_small_increases
         negotiator.last_offer = last_offer
         negotiator.last_counter = last_counter
         negotiator.consecutive_small_increases = prev_consec
@@ -479,10 +499,8 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             previous_lowball = last_deal_status.data[0].get("lowball_rounds", 0)
             negotiator.lowball_rounds = int(previous_lowball) if previous_lowball is not None else 0
 
-        # Pass the extracted intent into generate_counteroffer to allow discount_request logic to trigger
         counter_offer = negotiator.generate_counteroffer(extracted_offer, intent)
 
-        # Final decision handling
         if counter_offer == "final_decision":
             if offer.decision and offer.decision in ["deal", "no_deal"]:
                 if offer.decision == "deal":
@@ -569,3 +587,4 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
     except Exception as e:
         logging.error(f"Error in /negotiate: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
+
