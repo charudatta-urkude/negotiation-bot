@@ -422,14 +422,16 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             logging.error("Failed to convert extracted offer to float.")
             extracted_offer = None
 
-        if extracted_offer is None or extracted_offer == 0:
-            logging.info("Extracted offer is 0 or None, substituting with previous offer.")
-            extracted_offer = last_offer
-
         # [MODIFICATION 2]: Check for affirmative responses using the intent from extraction.
         if intent == "affirmative" and (extracted_offer is None or extracted_offer == 0):
             return {"status": "final_decision", "message": f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?", "counter_offer": last_counter}
 
+
+        if extracted_offer is None or extracted_offer == 0:
+            logging.info("Extracted offer is 0 or None, substituting with previous offer.")
+            extracted_offer = last_offer
+
+        
         # Handle no numerical offer gracefully
         if extracted_offer is None:
             human_response = await generate_ai_response_async(
