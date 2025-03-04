@@ -1,0 +1,12 @@
+name: Keep Render API Awake
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"  # Runs every 10 minutes
+
+jobs:
+  ping-api:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render API
+        run: curl -s https://negotiation-bot-pgn2.onrender.com
