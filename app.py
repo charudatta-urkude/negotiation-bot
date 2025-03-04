@@ -121,8 +121,9 @@ Use the following guidelines:
 1. "final_offer": Use this if the customer states a definitive price and indicates that it is final (e.g., "My final offer is 850").
 2. "discount_request": Use this if the customer explicitly asks for a discount.
 3. "hesitation": Use this if the customer shows uncertainty or hesitation.
-4. "negotiate": Use this if the customer is open to further discussion (e.g., "Can I get it at 800?").
-5. "other": Use this if none of the above apply.
+4. "affirmative": Use this if the customer responds affirmatively (e.g., "yes", "okay", "sure", "I agree") without mentioning a number.
+5. "negotiate": Use this if the customer is open to further discussion (e.g., "Can I get it at 800?").
+6. "other": Use this if none of the above apply.
 
 Return a valid JSON object exactly in the following format:
 {{"extracted_offer": null, "intent": "other"}}
@@ -143,6 +144,7 @@ Replace null with the numerical offer if found, and "other" with the appropriate
         logging.error(f"Error in extracting intent/offer: {e}")
         result = {"extracted_offer": None, "intent": "other"}
     return result
+
 async def generate_ai_response_async(customer_message: str, extracted_offer: float, counter_offer: float, round_number: int, intent: str, deal_status: str, conversation_history: List[Dict[str, str]] = None) -> str:
     cache_key = f"{customer_message}-{extracted_offer}-{counter_offer}-{round_number}-{intent}-{deal_status}"
     if cache_key in response_cache:
@@ -210,7 +212,6 @@ async def generate_ai_response_async(customer_message: str, extracted_offer: flo
     response_cache[cache_key] = result
     return result
 
-
 # --- Rule-Based Negotiation Logic ---
 class RuleBasedNegotiation:
     def __init__(self, max_price, min_price, acc_min_price):
@@ -225,7 +226,8 @@ class RuleBasedNegotiation:
         self.consecutive_small_increases = 0
         self.discount_ceiling = 0.3 * self.max_price
         self.total_discount_given = 0
-        self.urgency_trigger_round = random.randint(4, 6)
+        #self.urgency_trigger_round = random.randint(4, 6)
+        
 
     def generate_counteroffer(self, customer_offer, intent="normal"):
         self.negotiation_rounds += 1
@@ -233,6 +235,22 @@ class RuleBasedNegotiation:
             self.last_offer = self.max_price
         if self.last_counter is None:
             self.last_counter = self.max_price
+
+        # Special handling for discount_request intent:
+        if intent == "discount_request":
+            if self.consecutive_small_increases < 2:
+                self.consecutive_small_increases += 1
+                discount_factor = random.uniform(0.0033, 0.005)  # 0.33% to 0.5%
+                discount_amount = discount_factor * self.last_counter
+                self.total_discount_given += discount_amount
+                new_counter_offer = max(self.last_counter - discount_amount, self.acc_min_price, customer_offer)
+                new_counter_offer = min(new_counter_offer, self.last_counter)
+                new_counter_offer = round(new_counter_offer, 1)
+                self.last_offer = customer_offer
+                self.last_counter = new_counter_offer
+                return new_counter_offer
+            else:
+                return self.last_counter
 
         if customer_offer >= self.max_price:
             logging.info(f"Customer offered {customer_offer}, meeting/exceeding max price. Accepting deal.")
@@ -260,7 +278,8 @@ class RuleBasedNegotiation:
 
         if self.consecutive_small_increases >= 2:
             computed_discount = 0.02 * del_offer + 0.02 * (self.consecutive_small_increases - 2) * del_offer
-            minimum_discount = 0.01 * self.last_counter
+            disc_factor = random.uniform(0.007, 0.009)
+            minimum_discount = disc_factor * self.last_counter
             del_counter = max(computed_discount, minimum_discount)
         else:
             if offer_increase_percentage >= 10:
@@ -337,10 +356,11 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
         if last_deal_status.data:
             deal_status = last_deal_status.data[0].get("deal_status")
             lowball_rounds = last_deal_status.data[0].get("lowball_rounds", 0) or 0
-            if deal_status == "success" or lowball_rounds > 3:
+            # [MODIFICATION 1]: Block further negotiation if final decision already made
+            if deal_status in ["success", "failed"] or lowball_rounds > 3:
                 logging.info("Negotiation closed. No further offers allowed.")
                 return {"status": "failed", "message": "Negotiation closed. No further offers allowed."}
-
+        
         session_data = await fetch_session_data(offer.session_id)
         if not session_data:
             raise HTTPException(status_code=403, detail="Invalid session ID")
@@ -391,6 +411,10 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             logging.info("Extracted offer is 0 or None, substituting with previous offer.")
             extracted_offer = last_offer
 
+        # [MODIFICATION 2]: Check for affirmative responses using the intent from extraction.
+        if intent == "affirmative" and (extracted_offer is None or extracted_offer == 0):
+            return {"status": "final_decision", "message": f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?", "counter_offer": last_counter}
+
         # Handle no numerical offer gracefully
         if extracted_offer is None:
             human_response = await generate_ai_response_async(
@@ -422,7 +446,8 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             previous_lowball = last_deal_status.data[0].get("lowball_rounds", 0)
             negotiator.lowball_rounds = int(previous_lowball) if previous_lowball is not None else 0
 
-        counter_offer = negotiator.generate_counteroffer(extracted_offer)
+        # Pass the extracted intent into generate_counteroffer to allow discount_request logic to trigger
+        counter_offer = negotiator.generate_counteroffer(extracted_offer, intent)
 
         # Final decision handling
         if counter_offer == "final_decision":
