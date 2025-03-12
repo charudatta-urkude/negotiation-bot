@@ -5,17 +5,17 @@ import logging
 import asyncio
 import time
 from fastapi import FastAPI, HTTPException, BackgroundTasks
-from pydantic import BaseModel
 from supabase import create_client, Client
 from datetime import datetime
 import openai
 import json
 from cachetools import TTLCache
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional, List, Dict
+from typing import Any, Dict, Optional, List
+from pydantic import BaseModel, Field, ValidationError
 
 # --- Environment Setup & Global Configurations ---
-MODEL_NAME = os.getenv("MODEL_NAME", "gpt-3.5-turbo")  # Change to "gpt-4-turbo" if needed
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o")  # Change to "gpt-4-turbo" if needed
 MAX_TOKENS = 50
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -36,7 +36,6 @@ supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 # Caches for pricing data and AI responses
 pricing_cache = TTLCache(maxsize=100, ttl=600)
 response_cache = TTLCache(maxsize=100, ttl=300)
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -111,123 +110,203 @@ async def build_conversation_history(session_id: str, limit: int = 5) -> List[Di
                 messages.append({"role": "assistant", "content": entry.get("ai_response")})
     return messages
 
-# --- Asynchronous OpenAI API Calls with Caching ---
-async def extract_offer_intent_async(customer_message: str) -> dict:
+
+
+async def extract_offer_intent_async(customer_message: str, last_offer: float) -> dict:
+    # NEW MODIFICATION: Updated prompt with examples for each intent and additional factors.
     extraction_prompt = f"""
-Extract the numerical offer and negotiation intent from the following message:
+Extract detailed negotiation parameters from the following customer message:
 - Customer message: "{customer_message}"
 
-If the customer's message consists solely of affirmative words (e.g., "yes", "okay", "sure", "I agree") and does not contain any numerical value, then return the intent as "affirmative" and the extracted_offer as null.
+Your task is to extract the following fields:
 
-Use the following guidelines:
-1. "final_offer": Use this if the customer states a definitive price and indicates that it is final (e.g., "My final offer is 850").
-2. "discount_request": Use this if the customer explicitly asks for a discount.
-3. "hesitation": Use this if the customer shows uncertainty or hesitation (e.g., "I'm not sure", "Let me think").
-4. "affirmative": Use this if the customer agrees to the last counter-offer without specifying a new number. Examples:
-    - "Yes"
-    - "Okay"
-    - "Sure"
-    - "I agree"
-    - "Let's go with this"
-    - "I'll take it"
-    - similar affirmative words
-5. "negotiate": Use this if the customer is open to further discussion (e.g., "Can I get it at 800?").
-6. "other": Use this if none of the above apply.
+1. extracted_offer: The absolute numerical offer mentioned in the message (if any).  
+   - Example: "My final offer is 850" should yield extracted_offer = 850.
+   - Example: "I can get it for 750" should yield extracted_offer = 750.
+   
+2. increment: If the customer indicates a relative increase, extract that numerical value as a positive number.
+   - Example: "I can give 10 more" or "I can add 10" should yield increment = 10 (and effective_offer = last_offer + 10).
+   - Example: "Add 5 more" should yield increment = 5.
+
+3. decrement: If the customer indicates a relative decrease, extract that numerical value as a positive number.
+   - Example: "I can only reduce it by 20" should yield decrement = 20.
+
+4. quantity: If a bulk order is mentioned, extract the number of units.
+   - Example: "2 for 1600" should yield quantity = 2.
+   - If no quantity is mentioned, default to 1.
+
+5. intent: Determine the negotiation intent using these categories:
+***"affirmative": if the customer agrees to the last counter-offer without specifying a new number.****
+         * Example: "Okay", "Sure", "Yes", "Works for me", "I'll take it", "Let's go with this."
+   - "final_offer": if the customer states a definitive final price.
+         * Example: "My final offer is 850."
+   - "discount_request": if the customer explicitly asks for a discount.
+         * Example: "Can you give me a discount? I can pay 800."
+   - "hesitation": if the customer shows uncertainty or hesitation.
+         * Example: "I'm not sure, maybe around 810?" or "I need to think about this."
+   - "negotiate": if the customer is open to further discussion.
+         * Example: "Can I get it at 800?" or "How about 820?" 
+   - "other": if none of the above apply.
+         * Example: "I'm interested, but not sure about the price."
+   - Also include any cases not covered by these examples if needed.
+
+6. tone: Identify the emotional tone of the message.
+   - Examples: "aggressive" (e.g., "Your price is ridiculous!"), "emotional" (e.g., "I'm really desperate."), "neutral", or "friendly".
+
+7. ambiguity: If the message is ambiguous, include a note explaining the ambiguity.
+   - Example: "No clear number provided" if the message is vague.
+
+8. competitor_offer: If the customer references a competitor’s price, extract that value.
+   - Example: "Competitor X is offering 750" should yield competitor_offer = 750.
+
+9. shipping_needed: If the message mentions shipping terms, extract that information.
+   - Example: "If you include free shipping" should yield shipping_needed = true.
+   - Example: "rush shipping" should capture that information (can be a boolean or descriptive string).
+
+10. payment_terms: If the message includes conditions like installment or partial payment, extract that as a string.
+    - Example: "I need to pay in installments" should yield payment_terms = "installments".
+
+11. trade_in: If the customer mentions trading in an old item, return true.
+    - Example: "I'll trade in my old phone" should yield trade_in = true.
+
+
+12. effective_offer: Compute the effective offer as follows:
+    - If an "increment" is provided, effective_offer = last_offer + increment.
+         * Example: last_offer=800 and "I can give 10 more" results in effective_offer = 810.
+    - Else if a "decrement" is provided, effective_offer = last_offer - decrement.
+         * Example: last_offer=800 and "I can reduce my offer by 20" yields effective_offer = 780.
+    - Else if "extracted_offer" is provided and quantity > 1, effective_offer = extracted_offer divided by quantity.
+         * Example: "2 for 1600" yields effective_offer = 800.
+    - Otherwise, effective_offer = last_offer.
 
 Return a valid JSON object exactly in the following format:
 {{
     "extracted_offer": null,
-    "intent": "other"
+    "increment": 0.0,
+    "decrement": 0.0,
+    "quantity": 1,
+    "intent": "other",
+    "tone": "neutral",
+    "ambiguity": "",
+    "competitor_offer": null,
+    "shipping_needed": false,
+    "payment_terms": "",
+    "trade_in": false,
+    "other_factors": {{}},
+    "effective_offer": null
 }}
-Replace null with the numerical offer if found, and "other" with the detected intent.
-"""
-
+Replace null with the appropriate numerical value if found, and update the other fields accordingly.
+    """
+    
     try:
         response = await run_query(lambda: client.completions.create(
             model="gpt-3.5-turbo-instruct",
             prompt=extraction_prompt,
             temperature=0.2,
-            max_tokens=MAX_TOKENS
+            max_tokens=300
         ))
-        result = json.loads(response.choices[0].text.strip())
+        response_text = response.choices[0].text.strip()
+        result = json.loads(response_text)
     except json.JSONDecodeError as e:
         logging.error(f"JSON decode error in extracting intent/offer: {e}")
-        result = {"extracted_offer": None, "intent": "other"}
+        result = {
+            "extracted_offer": None,
+            "increment": 0.0,
+            "decrement": 0.0,
+            "quantity": 1,
+            "intent": "other",
+            "tone": "neutral",
+            "ambiguity": "",
+            "competitor_offer": None,
+            "shipping_needed": False,
+            "payment_terms": "",
+            "trade_in": False,
+            "other_factors": {},
+            "effective_offer": None
+        }
     except Exception as e:
         logging.error(f"Error in extracting intent/offer: {e}")
-        result = {"extracted_offer": None, "intent": "other"}
+        result = {
+            "extracted_offer": None,
+            "increment": 0.0,
+            "decrement": 0.0,
+            "quantity": 1,
+            "intent": "other",
+            "tone": "neutral",
+            "ambiguity": "",
+            "competitor_offer": None,
+            "shipping_needed": False,
+            "payment_terms": "",
+            "trade_in": False,
+            "other_factors": {},
+            "effective_offer": None
+        }
     
-    logging.info(f"Extracted intent: {result}")  # Log for debugging
-    return result
-
-async def generate_ai_response_async(customer_message: str, extracted_offer: float, counter_offer: float, round_number: int, intent: str, deal_status: str, conversation_history: List[Dict[str, str]] = None) -> str:
-    cache_key = f"{customer_message}-{extracted_offer}-{counter_offer}-{round_number}-{intent}-{deal_status}"
-    if cache_key in response_cache:
-        return response_cache[cache_key]
+    logging.info(f"Extracted details before effective_offer calculation: {result}")
     
-    if not extracted_offer or extracted_offer == 0:
-        extra_instructions = (
-            "Generate a friendly, natural response that acknowledges the customer's sentiment. Encourage further discussion without insisting on a number."
-        )
-    else:
-        if intent == "final_offer":
-            extra_instructions = (
-                "Acknowledge the customer's final offer in a friendly manner, and clearly include the counter-offer exactly as provided."
-            )
-        elif intent == "discount_request":
-            extra_instructions = (
-                "Explain your counteroffer with a light-hearted tone, include the counter-offer exactly as provided."
-            )
-        elif intent == "hesitation":
-            extra_instructions = (
-                "Address the customer's hesitation warmly and casually, and include the counter-offer exactly as provided."
-            )
+    # NEW MODIFICATION: Compute effective_offer by checking increment/decrement first.
+    try:
+        if result.get("increment", 0) != 0:
+            result["effective_offer"] = round(last_offer + float(result["increment"]), 1)
+        elif result.get("decrement", 0) != 0:
+            result["effective_offer"] = round(last_offer - float(result["decrement"]), 1)
+        elif result.get("extracted_offer") is not None:
+            qty = result.get("quantity", 1)
+            result["effective_offer"] = round(float(result["extracted_offer"]) / qty, 1)
         else:
-            extra_instructions = (
-                "Generate a natural, varied response to continue the negotiation. Include the counter-offer exactly as provided."
-            )
-    
-    # Build initial messages with context
-    messages = [{"role": "system", "content": "You are a negotiation bot that maintains context across multiple turns."}]
-    if conversation_history:
-        messages.extend(conversation_history)
-    
-    # Create the response prompt with strict instructions
-    response_prompt = f"""
-            You are a negotiation bot. Based on the following context, generate a final, humanlike response in a casual, friendly tone.
-            Avoid repeating fixed templates or phrases. Use diverse and witty language while ensuring the counter-offer value remains exactly as: "{counter_offer}".
-            The response must be complete within 50 tokens.
+            result["effective_offer"] = last_offer
+    except Exception as e:
+        logging.error(f"Error calculating effective_offer: {e}")
+        result["effective_offer"] = last_offer
 
-            Customer Message: "{customer_message}"
-            Extracted Offer: {"no offer" if not extracted_offer else extracted_offer}
-            Counter Offer: {counter_offer}
-            Intent: {intent}
-            Round: {round_number}
-
-            Instructions: {extra_instructions}
-
-            ***STRICT RULES:
-            - The response must be complete within 50 tokens.
-            - Use friendly, conversational, witty language, but don't overdo it. speak like a human
-            - The response MUST include the counter-offer: "{counter_offer}".
-            - Your final response must explicitly mention the counter-offer value exactly as: "{counter_offer}". Do not change this number.
-            - DO NOT GENERATE YOUR OWN OFFER. DO NOT GIVE ANY OFFER OTHER THAN THE COUNTER OFFER: "{counter_offer}" ***
-
-            Final Response:
-            """
-    messages.append({"role": "user", "content": response_prompt})
-    
-    response_generation = await run_query(lambda: client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=MAX_TOKENS
-    ))
-    result = response_generation.choices[0].message.content.strip()
-    response_cache[cache_key] = result
+    logging.info(f"Final extracted details: {result}")
     return result
 
-# --- Rule-Based Negotiation Logic ---
+
+
+async def generate_response_async(customer_message: str, extracted_details: dict, counter_offer: float, 
+                                  round_number: int, conversation_history: list) -> str:
+    system_message = (
+        "You are a negotiation bot that generates friendly, casual, and engaging responses.You can occasionally be witty or humorous, but do not overdo it"
+        "Your response must ALWAYS use the provided counter offer exactly as given. "
+        "DO NOT generate any new offer. Your job is to acknowledge the customer's message and clearly present the counter offer. "
+        "DO NOT use any currency symbol such as $, €, ₹ etc"
+        "DO NOT include any smiling characters in the response"
+        "Keep the tone light and natural, and limit your response to 50 tokens."
+    )
+    
+    user_message = (
+        f"Conversation History: {json.dumps(conversation_history)}\n\n"
+        f"Customer Message: \"{customer_message}\"\n"
+        f"Extracted Details: {json.dumps(extracted_details)}\n"
+        f"Computed Counter Offer (from rules): {counter_offer}\n"
+        "Based on the above, generate a final response that acknowledges the customer's message, "
+        "clearly states the counter offer exactly as provided, and encourages further discussion if needed. "
+        "Do NOT generate any offer other than the provided counter offer."
+    )
+    
+    messages = [
+        {"role": "system", "content": system_message},
+        {"role": "user", "content": user_message}
+    ]
+    
+    try:
+        response = await run_query(lambda: client.chat.completions.create(
+            model="gpt-4o",
+            messages=messages,
+            temperature=0.6,
+            max_tokens=50
+        ))
+        final_response = response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.error(f"Error generating response: {e}")
+        final_response = "I'm sorry, something went wrong. Could you please repeat your offer?"
+    
+    return final_response
+
+# --------------------------------------------------------------------------------
+# Rule-Based Negotiation Logic (including generate_counteroffer)
+# --------------------------------------------------------------------------------
 class RuleBasedNegotiation:
     def __init__(self, max_price, min_price, acc_min_price):
         self.max_price = max_price
@@ -242,20 +321,39 @@ class RuleBasedNegotiation:
         self.discount_ceiling = 0.3 * self.max_price
         self.total_discount_given = 0
         #self.urgency_trigger_round = random.randint(4, 6)
-        
 
-    def generate_counteroffer(self, customer_offer, intent="normal"):
+    # --------------------------------------------------------------------------------
+    # Updated generate_counteroffer function with additional parameters and modifications.
+    # --------------------------------------------------------------------------------
+    def generate_counteroffer(self, customer_offer, intent="normal", quantity=1, time_urgency=False, tone="neutral", 
+                               competitor_offer=None, shipping_needed=False, payment_terms="", trade_in=False, other_factors=None):
+        if other_factors is None:
+            other_factors = {}
+            
         self.negotiation_rounds += 1
         if self.last_offer is None:
             self.last_offer = self.max_price
         if self.last_counter is None:
             self.last_counter = self.max_price
 
-        # Special handling for discount_request intent:
+        if intent == "affirmative":
+            self.last_offer = customer_offer
+            return "affirmative_decision"
+
+        ## MODIFICATION 1 & Additional: Handle "negative" messages (e.g., "No, I cannot give at this price")
+        if intent == "negative":
+            minimal_discount = 0.01 * self.last_counter  # 0.2% minimal discount
+            new_counter_offer = max(self.last_counter - minimal_discount, self.acc_min_price, customer_offer)
+            new_counter_offer = round(new_counter_offer, 1)
+            self.last_offer = customer_offer
+            self.last_counter = new_counter_offer
+            return new_counter_offer
+
+        ## Existing branch for "discount_request" intent:
         if intent == "discount_request":
             if self.consecutive_small_increases < 2:
                 self.consecutive_small_increases += 1
-                discount_factor = random.uniform(0.0033, 0.005)  # 0.33% to 0.5%
+                discount_factor = random.uniform(0.03, 0.05) 
                 discount_amount = discount_factor * self.last_counter
                 self.total_discount_given += discount_amount
                 new_counter_offer = max(self.last_counter - discount_amount, self.acc_min_price, customer_offer)
@@ -279,11 +377,9 @@ class RuleBasedNegotiation:
                 return None
             return None
 
-         # Compute the change from the previous valid offer
         del_offer = customer_offer - self.last_offer if self.last_offer is not None else 0
         logging.info(f"Round {self.negotiation_rounds} - del_offer: {del_offer}")
         if del_offer < 0:
-            # Return the message while leaving previous values unchanged.
             logging.warning("Offer cannot be lower than the previous bid")
             return "invalid_offer"
 
@@ -295,10 +391,9 @@ class RuleBasedNegotiation:
             self.consecutive_small_increases = 0
 
         if self.consecutive_small_increases >= 2:
-                disc_factor = random.uniform(0.03, 0.05)
-                minimum_discount = disc_factor * self.last_counter
-                del_counter = minimum_discount
-
+            disc_factor = random.uniform(0.03, 0.05)
+            minimum_discount = disc_factor * self.last_counter
+            del_counter = minimum_discount
         else:
             if offer_increase_percentage >= 5:
                 del_counter = 0.9 * del_offer
@@ -309,6 +404,16 @@ class RuleBasedNegotiation:
             else:
                 del_counter = 0.6 * del_offer
 
+        ## MODIFICATION 3: Adjust discount if time urgency is flagged.
+        if time_urgency:
+            del_counter *= 0.5
+
+        ## MODIFICATION 4: Adjust discount based on conversation tone.
+        if tone == "emotional":
+            del_counter *= 1.1
+        elif tone == "aggressive":
+            del_counter *= 0.9
+
         del_counter = min(del_counter, 0.05 * self.max_price)
         if self.total_discount_given + del_counter > self.discount_ceiling:
             del_counter = self.discount_ceiling - self.total_discount_given
@@ -318,7 +423,46 @@ class RuleBasedNegotiation:
         new_counter_offer = min(new_counter_offer, self.last_counter)
         new_counter_offer = round(new_counter_offer, 1)
 
-        if abs(self.last_counter - customer_offer) < 0.01 * self.max_price:
+        ## MODIFICATION 2: Handle bulk/quantity orders.
+        if quantity > 1:
+            bulk_discount_factor = 0.02  # 2% discount per additional unit.
+            additional_discount = self.last_counter * bulk_discount_factor * (quantity - 1)
+            new_counter_offer = max(new_counter_offer - additional_discount, self.acc_min_price)
+            new_counter_offer = round(new_counter_offer, 1)
+
+        ## MODIFICATION 12: Apply randomization to avoid being too formulaic.
+        random_variation = random.uniform(0.98, 1.02)
+        new_counter_offer = max(min(new_counter_offer * random_variation, self.last_counter), self.acc_min_price)
+        new_counter_offer = round(new_counter_offer, 1)
+
+        ## NEW MODIFICATION: Adjust based on competitor_offer if provided.
+        if competitor_offer is not None:
+            if competitor_offer < new_counter_offer:
+                new_counter_offer = min(new_counter_offer, round(competitor_offer * 0.98, 1))  # Undercut by 2%
+
+        ## NEW MODIFICATION: Adjust for shipping needs.
+        if shipping_needed:
+            new_counter_offer = round(new_counter_offer * 1.05, 1)
+            new_counter_offer = min(new_counter_offer, self.last_counter)
+
+        ## NEW MODIFICATION: Adjust based on payment_terms.
+        if payment_terms.lower() in ["installment", "partial payment"]:
+            new_counter_offer = round(new_counter_offer * 1.05, 1)
+            new_counter_offer = min(new_counter_offer, self.last_counter)
+
+        ## NEW MODIFICATION: Adjust for trade_in scenarios.
+        if trade_in:
+            extra_discount = 0.03 * self.last_counter
+            new_counter_offer = max(new_counter_offer - extra_discount, self.acc_min_price)
+            new_counter_offer = round(new_counter_offer, 1)
+
+        ## NEW MODIFICATION: Apply additional adjustments from other_factors.
+        if "bonus_discount" in other_factors:
+            bonus = other_factors["bonus_discount"]
+            new_counter_offer = max(new_counter_offer - bonus, self.acc_min_price)
+            new_counter_offer = round(new_counter_offer, 1)
+
+        if abs(self.last_counter - customer_offer) <= 0.01 * self.max_price:
             return customer_offer
 
         if self.consecutive_small_increases >= 4:
@@ -328,7 +472,9 @@ class RuleBasedNegotiation:
         self.last_counter = new_counter_offer
         return new_counter_offer
 
-# --- Updated /start_negotiation Endpoint ---
+# --------------------------------------------------------------------------------
+# Updated /start_negotiation Endpoint
+# --------------------------------------------------------------------------------
 @app.post("/start_negotiation")
 async def start_negotiation(request: StartSessionRequest, background_tasks: BackgroundTasks):
     start_time = time.perf_counter()
@@ -351,7 +497,7 @@ async def start_negotiation(request: StartSessionRequest, background_tasks: Back
                 "session_id": session_id,
                 "user_id": request.user_id,
                 "product_id": request.product_id,
-                "customer_offer": 0,                    # Log initial customer offer as 0
+                "customer_offer": 0,  # Log initial customer offer as 0
                 "counter_offer": pricing_data["max_price"],  # Set initial counter offer as max_price
                 "round_number": 0,
                 "lowball_rounds": 0,
@@ -368,7 +514,9 @@ async def start_negotiation(request: StartSessionRequest, background_tasks: Back
         logging.error(f"Error in /start_negotiation: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
 
-# --- Updated /negotiate Endpoint ---
+# --------------------------------------------------------------------------------
+# Updated /negotiate Endpoint
+# --------------------------------------------------------------------------------
 @app.post("/negotiate")
 async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
     start_time = time.perf_counter()
@@ -385,7 +533,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             if deal_status in ["success", "failed", "final_decision"] or lowball_rounds > 3:
                 logging.info("Negotiation closed. No further offers allowed.")
                 return {"status": "failed", "message": "Negotiation closed. No further offers allowed."}
-        
+
         session_data = await fetch_session_data(offer.session_id)
         if not session_data:
             raise HTTPException(status_code=403, detail="Invalid session ID")
@@ -401,7 +549,6 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
 
         conversation_history = await build_conversation_history(offer.session_id, limit=5)
 
-        # Retrieve previous negotiation state from history
         last_negotiation = await run_query(lambda: supabase.table("history")
                                              .select("customer_offer", "counter_offer", "round_number", "consecutive_small_increases")
                                              .eq("session_id", offer.session_id)
@@ -410,12 +557,12 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                                              .execute())
         if last_negotiation.data:
             raw_offer = last_negotiation.data[0].get("customer_offer")
-            last_offer = float(raw_offer) if raw_offer is not None else None
+            last_offer = float(raw_offer) if raw_offer is not None else max_price  ## MODIFICATION: default to max_price if None.
             last_counter = float(last_negotiation.data[0].get("counter_offer") or max_price)
             last_round_number = int(last_negotiation.data[0].get("round_number") or 0)
             prev_consec = int(last_negotiation.data[0].get("consecutive_small_increases") or 0)
         else:
-            last_offer = None
+            last_offer = max_price
             last_counter = max_price
             last_round_number = 0
             prev_consec = 0
@@ -446,33 +593,35 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             }]).execute())
             return {"status": final_status, "human_response": final_message, "counter_offer": last_counter, "round_number": round_number}
 
-        extracted_data = await extract_offer_intent_async(offer.customer_message)
-        extracted_offer = extracted_data.get("extracted_offer")
-        intent = extracted_data.get("intent", "normal")
+        ## MODIFICATION: Use new extraction function.
+        extracted_data = await extract_offer_intent_async(offer.customer_message, last_offer)
+        intent_extracted = extracted_data.get("intent", "normal")
+        extracted_offer = extracted_data.get("effective_offer")
         try:
-            extracted_offer = float(extracted_offer) if extracted_offer is not None else None
+            extracted_offer = float(extracted_offer) if extracted_offer is not None else last_offer
         except ValueError:
             logging.error("Failed to convert extracted offer to float.")
-            extracted_offer = None
+            extracted_offer = last_offer
 
-        if intent == "affirmative" and (extracted_offer is None or extracted_offer == 0):
+        if intent_extracted == "affirmative" :
+        #and (extracted_offer is None or extracted_offer == 0):
             human_response = f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?"
-            counter_offer = "final_decision"
+            counter_offer = "affirmative_decision"
             await run_query(lambda: supabase.table("history").insert([{
-                    "session_id": offer.session_id,
-                    "user_id": user_id,
-                    "product_id": product_id,
-                    "round_number": round_number,
-                    "customer_offer": 0,
-                    "counter_offer": last_counter,
-                    "lowball_rounds": negotiator.lowball_rounds,
-                    "consecutive_small_increases": negotiator.consecutive_small_increases,
-                    "deal_status": "final_decision",
-                    "intent": intent,
-                    "customer_message": offer.customer_message,
-                    "ai_response": human_response,
-                    "created_at": datetime.utcnow().isoformat()
-                }]).execute())
+                "session_id": offer.session_id,
+                "user_id": user_id,
+                "product_id": product_id,
+                "round_number": round_number,
+                "customer_offer": last_offer,
+                "counter_offer": last_counter,
+                "lowball_rounds": negotiator.lowball_rounds,
+                "consecutive_small_increases": negotiator.consecutive_small_increases,
+                "deal_status": "final_decision",
+                "intent": intent_extracted,
+                "customer_message": offer.customer_message,
+                "ai_response": human_response,
+                "created_at": datetime.utcnow().isoformat()
+            }]).execute())
             return {"status": "final_decision", "message": human_response, "counter_offer": "final_decision"}
 
         if extracted_offer is None or extracted_offer == 0:
@@ -487,7 +636,20 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             previous_lowball = last_deal_status.data[0].get("lowball_rounds", 0)
             negotiator.lowball_rounds = int(previous_lowball) if previous_lowball is not None else 0
 
-        counter_offer = negotiator.generate_counteroffer(extracted_offer, intent)
+        ## MODIFICATION: Pass additional fields from extracted_data to generate_counteroffer.
+        counter_offer = negotiator.generate_counteroffer(
+            extracted_offer,
+            intent=intent_extracted,
+            quantity=extracted_data.get("quantity", 1),
+            time_urgency=False,  ## Optionally, set based on context.
+            tone=extracted_data.get("tone", "neutral"),
+            competitor_offer=extracted_data.get("competitor_offer"),
+            shipping_needed=extracted_data.get("shipping_needed"),
+            payment_terms=extracted_data.get("payment_terms"),
+            trade_in=extracted_data.get("trade_in"),
+            other_factors=extracted_data.get("other_factors")
+        )
+
         if counter_offer == "invalid_offer":
             message = "Offer cannot be lower than the previous bid"
             await run_query(lambda: supabase.table("history").insert([{
@@ -500,7 +662,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 "lowball_rounds": negotiator.lowball_rounds,
                 "consecutive_small_increases": negotiator.consecutive_small_increases,
                 "deal_status": "invalid_offer",
-                "intent": intent,
+                "intent": intent_extracted,
                 "customer_message": offer.customer_message,
                 "ai_response": message,
                 "created_at": datetime.utcnow().isoformat()
@@ -525,7 +687,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                     "lowball_rounds": negotiator.lowball_rounds,
                     "consecutive_small_increases": negotiator.consecutive_small_increases,
                     "deal_status": final_status,
-                    "intent": intent,
+                    "intent": intent_extracted,
                     "customer_message": offer.customer_message,
                     "ai_response": final_message,
                     "created_at": datetime.utcnow().isoformat()
@@ -545,7 +707,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 "lowball_rounds": negotiator.lowball_rounds,
                 "consecutive_small_increases": negotiator.consecutive_small_increases,
                 "deal_status": "terminated" if negotiator.lowball_rounds > 3 else "ongoing",
-                "intent": intent,
+                "intent": intent_extracted,
                 "customer_message": offer.customer_message,
                 "ai_response": "",
                 "created_at": datetime.utcnow().isoformat()
@@ -560,12 +722,15 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             human_response = f"Great! We have a deal at {counter_offer}. Looking forward to doing business with you!"
         else:
             deal_status_computed = "ongoing"
-            human_response = await generate_ai_response_async(
-                offer.customer_message, extracted_offer, counter_offer, round_number, intent, "ongoing", conversation_history
+            human_response = await generate_response_async(
+                offer.customer_message, extracted_data, counter_offer, round_number, conversation_history
             )
 
-        extracted_offer = float(extracted_offer)
-        counter_offer = float(counter_offer)
+        try:
+            extracted_offer = float(extracted_offer)
+            counter_offer = float(counter_offer)
+        except Exception as e:
+            logging.error(f"Conversion error: {e}")
 
         await run_query(lambda: supabase.table("history").insert([{
             "session_id": offer.session_id,
@@ -577,7 +742,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
             "lowball_rounds": negotiator.lowball_rounds,
             "consecutive_small_increases": negotiator.consecutive_small_increases,
             "deal_status": deal_status_computed,
-            "intent": intent,
+            "intent": intent_extracted,
             "customer_message": offer.customer_message,
             "ai_response": human_response,
             "created_at": datetime.utcnow().isoformat()
