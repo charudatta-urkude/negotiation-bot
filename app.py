@@ -139,7 +139,7 @@ Your task is to extract the following fields:
 ***"affirmative": if the customer agrees to the last counter-offer without specifying a new number.****
          * Example: "Okay", "Sure", "Yes", "Works for me", "I'll take it", "Let's go with this."
    - "final_offer": if the customer states a definitive final price.
-         * Example: "My final offer is 850."
+         * Example: "My final offer is 850." or "810 is final offer, take it or leave it." 
    - "discount_request": if the customer explicitly asks for a discount.
          * Example: "Can you give me a discount? I can pay 800."
    - "hesitation": if the customer shows uncertainty or hesitation.
@@ -202,7 +202,7 @@ Replace null with the appropriate numerical value if found, and update the other
         response = await run_query(lambda: client.completions.create(
             model="gpt-3.5-turbo-instruct",
             prompt=extraction_prompt,
-            temperature=0.2,
+            temperature=0.1,
             max_tokens=300
         ))
         response_text = response.choices[0].text.strip()
@@ -267,7 +267,7 @@ Replace null with the appropriate numerical value if found, and update the other
 async def generate_response_async(customer_message: str, extracted_details: dict, counter_offer: float, 
                                   round_number: int, conversation_history: list) -> str:
     system_message = (
-        "You are a negotiation bot that generates friendly, casual, and engaging responses.You can occasionally be witty or humorous, but do not overdo it"
+        "You are a negotiation bot that generates friendly, casual,ocassionally humorous and engaging responses."
         "Your response must ALWAYS use the provided counter offer exactly as given. "
         "DO NOT generate any new offer. Your job is to acknowledge the customer's message and clearly present the counter offer. "
         "DO NOT use any currency symbol such as $, €, ₹ etc"
@@ -520,159 +520,60 @@ async def start_negotiation(request: StartSessionRequest, background_tasks: Back
 @app.post("/negotiate")
 async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
     start_time = time.perf_counter()
-    try:
-        last_deal_status = await run_query(lambda: supabase.table("history")
-                                             .select("deal_status", "lowball_rounds")
-                                             .eq("session_id", offer.session_id)
-                                             .order("created_at", desc=True)
-                                             .limit(1)
-                                             .execute())
-        if last_deal_status.data and not offer.decision:
-            deal_status = last_deal_status.data[0].get("deal_status")
-            lowball_rounds = last_deal_status.data[0].get("lowball_rounds", 0) or 0
-            if deal_status in ["success", "failed", "final_decision"] or lowball_rounds > 3:
-                logging.info("Negotiation closed. No further offers allowed.")
-                return {"status": "failed", "message": "Negotiation closed. No further offers allowed."}
-
-        session_data = await fetch_session_data(offer.session_id)
-        if not session_data:
-            raise HTTPException(status_code=403, detail="Invalid session ID")
-        user_id = session_data["user_id"]
-        product_id = session_data["product_id"]
-
-        pricing_data = await get_pricing_data(str(product_id))
-        max_price = pricing_data["max_price"]
-        min_price = pricing_data["min_price"]
-        acc_min_price = pricing_data["acc_min_price"]
-
-        negotiator = RuleBasedNegotiation(max_price, min_price, acc_min_price)
-
-        conversation_history = await build_conversation_history(offer.session_id, limit=5)
-
-        last_negotiation = await run_query(lambda: supabase.table("history")
-                                             .select("customer_offer", "counter_offer", "round_number", "consecutive_small_increases")
-                                             .eq("session_id", offer.session_id)
-                                             .order("created_at", desc=True)
-                                             .limit(1)
-                                             .execute())
-        if last_negotiation.data:
-            raw_offer = last_negotiation.data[0].get("customer_offer")
-            last_offer = float(raw_offer) if raw_offer is not None else max_price  ## MODIFICATION: default to max_price if None.
-            last_counter = float(last_negotiation.data[0].get("counter_offer") or max_price)
-            last_round_number = int(last_negotiation.data[0].get("round_number") or 0)
-            prev_consec = int(last_negotiation.data[0].get("consecutive_small_increases") or 0)
-        else:
-            last_offer = max_price
-            last_counter = max_price
-            last_round_number = 0
-            prev_consec = 0
-
-        round_number = last_round_number + 1
-
-        if offer.decision and offer.decision in ["deal", "no_deal"]:
-            if offer.decision == "deal":
-                final_message = f"Great! The deal is locked in at {last_counter}. Thank you for negotiating!"
-                final_status = "success"
-            else:
-                final_message = "No deal made. Thank you for trying, maybe next time!"
-                final_status = "failed"
-            await run_query(lambda: supabase.table("history").insert([{
-                "session_id": offer.session_id,
-                "user_id": user_id,
-                "product_id": product_id,
-                "round_number": round_number,
-                "customer_offer": last_offer,
-                "counter_offer": last_counter,
-                "lowball_rounds": prev_consec,
-                "consecutive_small_increases": prev_consec,
-                "deal_status": final_status,
-                "intent": "final_decision",
-                "customer_message": offer.customer_message,
-                "ai_response": final_message,
-                "created_at": datetime.utcnow().isoformat()
-            }]).execute())
-            return {"status": final_status, "human_response": final_message, "counter_offer": last_counter, "round_number": round_number}
-
-        ## MODIFICATION: Use new extraction function.
-        extracted_data = await extract_offer_intent_async(offer.customer_message, last_offer)
-        intent_extracted = extracted_data.get("intent", "normal")
-        extracted_offer = extracted_data.get("effective_offer")
+    max_retries = 3  # Try up to 3 additional times
+    for attempt in range(max_retries):
         try:
-            extracted_offer = float(extracted_offer) if extracted_offer is not None else last_offer
-        except ValueError:
-            logging.error("Failed to convert extracted offer to float.")
-            extracted_offer = last_offer
+            last_deal_status = await run_query(lambda: supabase.table("history")
+                                                .select("deal_status", "lowball_rounds")
+                                                .eq("session_id", offer.session_id)
+                                                .order("created_at", desc=True)
+                                                .limit(1)
+                                                .execute())
+            if last_deal_status.data and not offer.decision:
+                deal_status = last_deal_status.data[0].get("deal_status")
+                lowball_rounds = last_deal_status.data[0].get("lowball_rounds", 0) or 0
+                if deal_status in ["success", "failed", "final_decision"] or lowball_rounds > 3:
+                    logging.info("Negotiation closed. No further offers allowed.")
+                    return {"status": "failed", "message": "Negotiation closed. No further offers allowed."}
 
-        if intent_extracted == "affirmative" :
-        #and (extracted_offer is None or extracted_offer == 0):
-            human_response = f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?"
-            counter_offer = "affirmative_decision"
-            await run_query(lambda: supabase.table("history").insert([{
-                "session_id": offer.session_id,
-                "user_id": user_id,
-                "product_id": product_id,
-                "round_number": round_number,
-                "customer_offer": last_offer,
-                "counter_offer": last_counter,
-                "lowball_rounds": negotiator.lowball_rounds,
-                "consecutive_small_increases": negotiator.consecutive_small_increases,
-                "deal_status": "final_decision",
-                "intent": intent_extracted,
-                "customer_message": offer.customer_message,
-                "ai_response": human_response,
-                "created_at": datetime.utcnow().isoformat()
-            }]).execute())
-            return {"status": "final_decision", "message": human_response, "counter_offer": "final_decision"}
+            session_data = await fetch_session_data(offer.session_id)
+            if not session_data:
+                raise HTTPException(status_code=403, detail="Invalid session ID")
+            user_id = session_data["user_id"]
+            product_id = session_data["product_id"]
 
-        if extracted_offer is None or extracted_offer == 0:
-            logging.info("Extracted offer is 0 or None, substituting with previous offer.")
-            extracted_offer = last_offer
+            pricing_data = await get_pricing_data(str(product_id))
+            max_price = pricing_data["max_price"]
+            min_price = pricing_data["min_price"]
+            acc_min_price = pricing_data["acc_min_price"]
 
-        negotiator.last_offer = last_offer
-        negotiator.last_counter = last_counter
-        negotiator.consecutive_small_increases = prev_consec
+            negotiator = RuleBasedNegotiation(max_price, min_price, acc_min_price)
 
-        if last_deal_status.data:
-            previous_lowball = last_deal_status.data[0].get("lowball_rounds", 0)
-            negotiator.lowball_rounds = int(previous_lowball) if previous_lowball is not None else 0
+            conversation_history = await build_conversation_history(offer.session_id, limit=5)
 
-        ## MODIFICATION: Pass additional fields from extracted_data to generate_counteroffer.
-        counter_offer = negotiator.generate_counteroffer(
-            extracted_offer,
-            intent=intent_extracted,
-            quantity=extracted_data.get("quantity", 1),
-            time_urgency=False,  ## Optionally, set based on context.
-            tone=extracted_data.get("tone", "neutral"),
-            competitor_offer=extracted_data.get("competitor_offer"),
-            shipping_needed=extracted_data.get("shipping_needed"),
-            payment_terms=extracted_data.get("payment_terms"),
-            trade_in=extracted_data.get("trade_in"),
-            other_factors=extracted_data.get("other_factors")
-        )
+            last_negotiation = await run_query(lambda: supabase.table("history")
+                                                .select("customer_offer", "counter_offer", "round_number", "consecutive_small_increases")
+                                                .eq("session_id", offer.session_id)
+                                                .order("created_at", desc=True)
+                                                .limit(1)
+                                                .execute())
+            if last_negotiation.data:
+                raw_offer = last_negotiation.data[0].get("customer_offer")
+                last_offer = float(raw_offer) if raw_offer is not None else max_price  ## MODIFICATION: default to max_price if None.
+                last_counter = float(last_negotiation.data[0].get("counter_offer") or max_price)
+                last_round_number = int(last_negotiation.data[0].get("round_number") or 0)
+                prev_consec = int(last_negotiation.data[0].get("consecutive_small_increases") or 0)
+            else:
+                last_offer = max_price
+                last_counter = max_price
+                last_round_number = 0
+                prev_consec = 0
 
-        if counter_offer == "invalid_offer":
-            message = "Offer cannot be lower than the previous bid"
-            await run_query(lambda: supabase.table("history").insert([{
-                "session_id": offer.session_id,
-                "user_id": user_id,
-                "product_id": product_id,
-                "round_number": round_number,
-                "customer_offer": last_offer,
-                "counter_offer": last_counter,
-                "lowball_rounds": negotiator.lowball_rounds,
-                "consecutive_small_increases": negotiator.consecutive_small_increases,
-                "deal_status": "invalid_offer",
-                "intent": intent_extracted,
-                "customer_message": offer.customer_message,
-                "ai_response": message,
-                "created_at": datetime.utcnow().isoformat()
-            }]).execute())
-            return {"status": "invalid_offer", "message": message, "counter_offer": last_counter, "round_number": round_number}
+            round_number = last_round_number + 1
 
-        if counter_offer == "final_decision":
             if offer.decision and offer.decision in ["deal", "no_deal"]:
                 if offer.decision == "deal":
-                    final_message = f"Great! The deal is locked in at {negotiator.last_counter}. Thank you for negotiating!"
+                    final_message = f"Great! The deal is locked in at {last_counter}. Thank you for negotiating!"
                     final_status = "success"
                 else:
                     final_message = "No deal made. Thank you for trying, maybe next time!"
@@ -682,79 +583,182 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                     "user_id": user_id,
                     "product_id": product_id,
                     "round_number": round_number,
-                    "customer_offer": float(extracted_offer),
-                    "counter_offer": negotiator.last_counter,
-                    "lowball_rounds": negotiator.lowball_rounds,
-                    "consecutive_small_increases": negotiator.consecutive_small_increases,
+                    "customer_offer": last_offer,
+                    "counter_offer": last_counter,
+                    "lowball_rounds": prev_consec,
+                    "consecutive_small_increases": prev_consec,
                     "deal_status": final_status,
-                    "intent": intent_extracted,
+                    "intent": "final_decision",
                     "customer_message": offer.customer_message,
                     "ai_response": final_message,
                     "created_at": datetime.utcnow().isoformat()
                 }]).execute())
-                return {"status": final_status, "human_response": final_message, "counter_offer": negotiator.last_counter, "round_number": round_number}
-            else:
-                return {"status": "final_decision", "message": f"My final offer is {negotiator.last_counter}. Would you like to secure the deal?", "counter_offer": negotiator.last_counter}
+                return {"status": final_status, "human_response": final_message, "counter_offer": last_counter, "round_number": round_number}
 
-        if counter_offer is None:
+            ## MODIFICATION: Use new extraction function.
+            extracted_data = await extract_offer_intent_async(offer.customer_message, last_offer)
+            intent_extracted = extracted_data.get("intent", "normal")
+            extracted_offer = extracted_data.get("effective_offer")
+            try:
+                extracted_offer = float(extracted_offer) if extracted_offer is not None else last_offer
+            except ValueError:
+                logging.error("Failed to convert extracted offer to float.")
+                extracted_offer = last_offer
+
+            if intent_extracted == "affirmative" :
+            #and (extracted_offer is None or extracted_offer == 0):
+                human_response = f"Your response seems affirmative. Would you like to lock in the deal at {last_counter}?"
+                counter_offer = "affirmative_decision"
+                await run_query(lambda: supabase.table("history").insert([{
+                    "session_id": offer.session_id,
+                    "user_id": user_id,
+                    "product_id": product_id,
+                    "round_number": round_number,
+                    "customer_offer": last_offer,
+                    "counter_offer": last_counter,
+                    "lowball_rounds": negotiator.lowball_rounds,
+                    "consecutive_small_increases": negotiator.consecutive_small_increases,
+                    "deal_status": "final_decision",
+                    "intent": intent_extracted,
+                    "customer_message": offer.customer_message,
+                    "ai_response": human_response,
+                    "created_at": datetime.utcnow().isoformat()
+                }]).execute())
+                return {"status": "final_decision", "message": human_response, "counter_offer": "final_decision"}
+
+            if extracted_offer is None or extracted_offer == 0:
+                logging.info("Extracted offer is 0 or None, substituting with previous offer.")
+                extracted_offer = last_offer
+
+            negotiator.last_offer = last_offer
+            negotiator.last_counter = last_counter
+            negotiator.consecutive_small_increases = prev_consec
+
+            if last_deal_status.data:
+                previous_lowball = last_deal_status.data[0].get("lowball_rounds", 0)
+                negotiator.lowball_rounds = int(previous_lowball) if previous_lowball is not None else 0
+
+            ## MODIFICATION: Pass additional fields from extracted_data to generate_counteroffer.
+            counter_offer = negotiator.generate_counteroffer(
+                extracted_offer,
+                intent=intent_extracted,
+                quantity=extracted_data.get("quantity", 1),
+                time_urgency=False,  ## Optionally, set based on context.
+                tone=extracted_data.get("tone", "neutral"),
+                competitor_offer=extracted_data.get("competitor_offer"),
+                shipping_needed=extracted_data.get("shipping_needed"),
+                payment_terms=extracted_data.get("payment_terms"),
+                trade_in=extracted_data.get("trade_in"),
+                other_factors=extracted_data.get("other_factors")
+            )
+
+            if counter_offer == "invalid_offer":
+                message = "Offer cannot be lower than the previous bid"
+                await run_query(lambda: supabase.table("history").insert([{
+                    "session_id": offer.session_id,
+                    "user_id": user_id,
+                    "product_id": product_id,
+                    "round_number": round_number,
+                    "customer_offer": last_offer,
+                    "counter_offer": last_counter,
+                    "lowball_rounds": negotiator.lowball_rounds,
+                    "consecutive_small_increases": negotiator.consecutive_small_increases,
+                    "deal_status": "invalid_offer",
+                    "intent": intent_extracted,
+                    "customer_message": offer.customer_message,
+                    "ai_response": message,
+                    "created_at": datetime.utcnow().isoformat()
+                }]).execute())
+                return {"status": "invalid_offer", "message": message, "counter_offer": last_counter, "round_number": round_number}
+
+            if counter_offer == "final_decision":
+                if offer.decision and offer.decision in ["deal", "no_deal"]:
+                    if offer.decision == "deal":
+                        final_message = f"Great! The deal is locked in at {negotiator.last_counter}. Thank you for negotiating!"
+                        final_status = "success"
+                    else:
+                        final_message = "No deal made. Thank you for trying, maybe next time!"
+                        final_status = "failed"
+                    await run_query(lambda: supabase.table("history").insert([{
+                        "session_id": offer.session_id,
+                        "user_id": user_id,
+                        "product_id": product_id,
+                        "round_number": round_number,
+                        "customer_offer": float(extracted_offer),
+                        "counter_offer": negotiator.last_counter,
+                        "lowball_rounds": negotiator.lowball_rounds,
+                        "consecutive_small_increases": negotiator.consecutive_small_increases,
+                        "deal_status": final_status,
+                        "intent": intent_extracted,
+                        "customer_message": offer.customer_message,
+                        "ai_response": final_message,
+                        "created_at": datetime.utcnow().isoformat()
+                    }]).execute())
+                    return {"status": final_status, "human_response": final_message, "counter_offer": negotiator.last_counter, "round_number": round_number}
+                else:
+                    return {"status": "final_decision", "message": f"My final offer is {negotiator.last_counter}. Would you like to secure the deal?", "counter_offer": negotiator.last_counter}
+
+            if counter_offer is None:
+                await run_query(lambda: supabase.table("history").insert([{
+                    "session_id": offer.session_id,
+                    "user_id": user_id,
+                    "product_id": product_id,
+                    "round_number": round_number,
+                    "customer_offer": last_offer,
+                    "counter_offer": last_counter,
+                    "lowball_rounds": negotiator.lowball_rounds,
+                    "consecutive_small_increases": negotiator.consecutive_small_increases,
+                    "deal_status": "terminated" if negotiator.lowball_rounds > 3 else "ongoing",
+                    "intent": intent_extracted,
+                    "customer_message": offer.customer_message,
+                    "ai_response": "",
+                    "created_at": datetime.utcnow().isoformat()
+                }]).execute())
+                if negotiator.lowball_rounds > 3:
+                    return {"status": "failed", "message": "Negotiation terminated due to too many low offers."}
+                return {"status": "failed", "message": "Your offer is too low. Please make a reasonable offer to continue."}
+
+            if (abs(last_counter - extracted_offer) / last_counter) <= 0.02:
+                deal_status_computed = "success"
+                counter_offer = extracted_offer
+                human_response = f"Great! We have a deal at {counter_offer}. Looking forward to doing business with you!"
+            else:
+                deal_status_computed = "ongoing"
+                human_response = await generate_response_async(
+                    offer.customer_message, extracted_data, counter_offer, round_number, conversation_history
+                )
+
+            try:
+                extracted_offer = float(extracted_offer)
+                counter_offer = float(counter_offer)
+            except Exception as e:
+                logging.error(f"Conversion error: {e}")
+
             await run_query(lambda: supabase.table("history").insert([{
                 "session_id": offer.session_id,
                 "user_id": user_id,
                 "product_id": product_id,
                 "round_number": round_number,
-                "customer_offer": last_offer,
-                "counter_offer": last_counter,
+                "customer_offer": extracted_offer,
+                "counter_offer": counter_offer,
                 "lowball_rounds": negotiator.lowball_rounds,
                 "consecutive_small_increases": negotiator.consecutive_small_increases,
-                "deal_status": "terminated" if negotiator.lowball_rounds > 3 else "ongoing",
+                "deal_status": deal_status_computed,
                 "intent": intent_extracted,
                 "customer_message": offer.customer_message,
-                "ai_response": "",
+                "ai_response": human_response,
                 "created_at": datetime.utcnow().isoformat()
             }]).execute())
-            if negotiator.lowball_rounds > 3:
-                return {"status": "failed", "message": "Negotiation terminated due to too many low offers."}
-            return {"status": "failed", "message": "Your offer is too low. Please make a reasonable offer to continue."}
-
-        if (abs(last_counter - extracted_offer) / last_counter) <= 0.02:
-            deal_status_computed = "success"
-            counter_offer = extracted_offer
-            human_response = f"Great! We have a deal at {counter_offer}. Looking forward to doing business with you!"
-        else:
-            deal_status_computed = "ongoing"
-            human_response = await generate_response_async(
-                offer.customer_message, extracted_data, counter_offer, round_number, conversation_history
-            )
-
-        try:
-            extracted_offer = float(extracted_offer)
-            counter_offer = float(counter_offer)
+            background_tasks.add_task(logging.info, f"/negotiate took {time.perf_counter() - start_time:.3f} seconds")
+            return {
+                "status": deal_status_computed,
+                "human_response": human_response,
+                "counter_offer": counter_offer,
+                "round_number": round_number
+            }
         except Exception as e:
-            logging.error(f"Conversion error: {e}")
-
-        await run_query(lambda: supabase.table("history").insert([{
-            "session_id": offer.session_id,
-            "user_id": user_id,
-            "product_id": product_id,
-            "round_number": round_number,
-            "customer_offer": extracted_offer,
-            "counter_offer": counter_offer,
-            "lowball_rounds": negotiator.lowball_rounds,
-            "consecutive_small_increases": negotiator.consecutive_small_increases,
-            "deal_status": deal_status_computed,
-            "intent": intent_extracted,
-            "customer_message": offer.customer_message,
-            "ai_response": human_response,
-            "created_at": datetime.utcnow().isoformat()
-        }]).execute())
-        background_tasks.add_task(logging.info, f"/negotiate took {time.perf_counter() - start_time:.3f} seconds")
-        return {
-            "status": deal_status_computed,
-            "human_response": human_response,
-            "counter_offer": counter_offer,
-            "round_number": round_number
-        }
-    
-    except Exception as e:
-        logging.error(f"Error in /negotiate: {str(e)}")
-        raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
+            logging.error(f"Attempt {attempt+1} failed in /negotiate: {str(e)}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(1)  # Wait for 1 second before retrying
+            else:
+                raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
