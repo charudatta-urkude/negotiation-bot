@@ -275,7 +275,7 @@ Return ONLY the JSON object exactly in the format provided above, with no additi
 # NEW MODIFICATION: Added a new optional parameter 'scenario' and 'product_info' to tailor responses.
 async def generate_response_async(customer_message: str, extracted_details: dict, counter_offer: float, 
                                   round_number: int, conversation_history: list, scenario: str = "", product_info: str = "") -> str:
-    # Define a list of product features (one at a time) to be used in responses.
+    # Randomly select one product feature to highlight
     product_features = [
         "superior quality material",
         "innovative design",
@@ -283,144 +283,92 @@ async def generate_response_async(customer_message: str, extracted_details: dict
         "exceptional comfort",
         "modern slim fit"
     ]
-    # Pick one feature randomly
     feature_to_use = random.choice(product_features)
-    
-    # Use different system messages based on the scenario, using exact scenario terminology.
+
+    # Define the system message with dynamic AI crafting
+    system_message = (
+        "You are a negotiation assistant with a casual yet persuasive style, "
+        "capable of humor and sarcasm where appropriate. "
+        "Your goal is to generate **dynamic**, engaging, and non-repetitive responses. "
+        "Always be context-aware and adapt to the conversation flow. "
+        "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
+        "DO NOT use any currency symbols (like $, €, ₹, etc) or include any smiling characters or any '\'. "
+        "Keep responses **concise (max 50 tokens)** and natural, ensuring variety in phrasing."
+    )
+
+    # **Custom Instructions for Different Scenarios**
     if scenario == "negotiation_closed":
-        system_message = (
-            "You are a negotiation bot handling a closed negotiation. "
-            "Inform the customer that no further offers are accepted as the negotiation is closed. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone firm and professional, and limit your response to 50-75 tokens."
-        )
+        scenario_instruction = "The negotiation is over. Politely inform the customer that no more offers can be considered."
     elif scenario == "final_decision":
-        system_message = (
-            "You are a negotiation bot delivering the final decision. "
-            "Confirm that the deal is either accepted or rejected, using the provided counter offer exactly as given. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone clear and conclusive, and limit your response to 50-75 tokens."
-        )
-    elif scenario == "affirmative_response":
-        system_message = (
-            "You are a negotiation bot that acknowledges the customer's affirmative response to the counter offer. "
-            "Confirm the deal by restating the provided counter offer exactly as given. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone friendly and positive, and limit your response to 50-75 tokens."
-        )
-    elif scenario == "missing_offer":
-        system_message = (
-            "You are a negotiation bot prompting the customer to provide a clear offer because no valid offer was detected. "
-            "Encourage them to enter a competitive price and use the provided counter offer exactly as given. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone engaging and limit your response to 50-75 tokens."
-        )
-    elif scenario in ["lowball_offer", "lowball_terminated"]:
-        system_message = (
-            "You are a negotiation bot that identifies a lowball offer. "
-            "Inform the customer that the offered price is far below the product’s value and that this is the maximum reduction possible unless a serious offer is provided. "
-            "Your job is to coax the customer to increase their offer, so be persuasive"
-            "or ask them to come up with a more competitive offer, all while highlighting the product's " + feature_to_use + "."
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep the tone light and natural, and limit your response to 50-75 tokens."
-        )
-    elif scenario == "terminated_offer":
-        system_message = (
-            "You are a negotiation bot that must terminate the negotiation due to persistently low offers. "
-            "Clearly inform the customer that the negotiation is terminated and no further offers will be entertained, using the provided counter offer exactly as given. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone firm and final, and limit your response to 50-75 tokens."
-        )
-    elif scenario == "deal_acceptance":
-        system_message = (
-            "You are a negotiation bot confirming deal acceptance. "
-            "State that the deal is accepted at the provided counter offer, emphasizing that the product's " + feature_to_use + " makes it worth the price. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone positive and conclusive, and limit your response to 50-75 tokens."
-        )
-    elif scenario == "ongoing_negotiation":
-        system_message = (
-            "You are a negotiation bot that is still negotiating. "
-            "State the provided counter offer exactly as given and encourage the customer to provide a revised offer. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone friendly and open, and limit your response to 50-75 tokens."
-        )
-    elif scenario == "small_increase":
-        system_message = (
-            "You are a negotiation bot with a sense of humor. "
-            "Playfully inform the customer that increasing the offer by such small steps is like taking baby steps, "
-            "and encourage them to be more generous if they truly want the product. "
-            "Use the provided counter offer exactly as given and mention the product's " + feature_to_use + " to highlight its value. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone light and engaging, and limit your response to 50-75 tokens."
-        )
+        scenario_instruction = "This is the final offer. State the counter offer clearly and wrap up the deal."
+    elif scenario == "affirmative_decision":
+        scenario_instruction = "The customer has accepted the deal. Confirm the agreement politely."
     elif scenario == "invalid_offer":
-        # Invalid offer: humorously taunt the customer for offering less than the previous bid.
-        system_message = (
-            "You are a playful negotiation bot. "
-            "If a customer gives an offer lower than the previous bid, humorously mention that they are trying to game the system. "
-            "For example, say 'Nice try, but offers can't go backwards!' and encourage them to provide a higher offer. "
-            "Incorporate a mention of the product's " + feature_to_use + " to reinforce its value."
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep your tone light and engaging, and limit your response to 50-75 tokens."
+        scenario_instruction = (
+            "The customer tried lowering their offer instead of increasing it. Respond sarcastically but stay professional. "
+            "Make it clear that the counter offer stands."
+        )
+    elif scenario == "lowball_warning_1":
+        scenario_instruction = (
+            "The customer’s offer is extremely low. Use **light humor** to call this out and encourage a serious counteroffer."
+        )
+    elif scenario == "lowball_warning_2":
+        scenario_instruction = (
+            "The customer still lowballs. Give a **small concession**, but remind them that they need to offer better."
+        )
+    elif scenario == "lowball_warning_3":
+        scenario_instruction = (
+            "This is the third lowball. Make it clear that this is the **final offer** and the negotiation may end soon."
+        )
+    elif scenario == "lowball_terminated":
+        scenario_instruction = "The customer kept lowballing. Politely close the negotiation."
+    elif scenario == "small_increase":
+        scenario_instruction = (
+            "The customer slightly increased their offer. **Playfully** encourage them to make a bolder move."
         )
     elif scenario == "justification":
-        system_message = (
-            "You are a sales-driven negotiation bot. The customer is questioning the price. "
-            "Highlight the product's " + feature_to_use + " to justify its price. "
-            "Keep the tone persuasive and friendly, and use the provided counter offer exactly as given. "
-            "DO NOT change the previous counteroffer. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep the response limited to 50-75 tokens."
+        scenario_instruction = (
+            "The customer is questioning the price. Justify it persuasively by highlighting the product's "
+            f"**{feature_to_use}**."
         )
+    elif scenario == "deal_acceptance":
+        scenario_instruction = "Confirm the deal has been accepted. Keep it concise and celebratory."
+    elif scenario == "ongoing_negotiation":
+        scenario_instruction = "Encourage the customer to counter with a reasonable offer while stating the counter offer."
     else:
-        system_message = (
-            "You are a negotiation bot that generates friendly, casual, and engaging responses. "
-            "Your response must ALWAYS use the provided counter offer exactly as given; do NOT generate any new offer. "
-            "DO NOT use any currency symbol (like $, €, ₹, etc) or include any smiling characters. "
-            "Keep the tone light and natural, and limit your response to 50-75 tokens. "
-            f"Scenario: {scenario}"
-        )
-    
+        scenario_instruction = "This is an open negotiation. Encourage the customer to engage further."
+
+    # **User Message: Provides Context for AI Response**
     user_message = (
         f"Conversation History: {json.dumps(conversation_history)}\n\n"
         f"Customer Message: \"{customer_message}\"\n"
-        f"Extracted Details: {json.dumps(extracted_details)}\n"
-        f"Provided Counter Offer (from rules): {counter_offer}\n"
-        f"Product Information: {product_info}\n\n"
-        "Based on the above, generate a final response that acknowledges the customer's message, "
-        "clearly states the counter offer exactly as provided, and, if needed, highlights a key product feature to justify the price."
+        f"Scenario: {scenario}\n"
+        f"Counter Offer: {counter_offer}\n"
+        f"Product Info: {product_info}\n"
+        f"Feature to highlight: {feature_to_use}\n\n"
+        f"{scenario_instruction}\n"
+        "Generate a response that is conversational, context-aware, and engaging."
     )
-    
+
     messages = [
         {"role": "system", "content": system_message},
         {"role": "user", "content": user_message}
     ]
-    
+
     try:
         response = await run_query(lambda: client.chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.6,
-            max_tokens=75
+            temperature=0.7,  # Allows for variety in responses while keeping them controlled
+            max_tokens=100
         ))
         final_response = response.choices[0].message.content.strip()
     except Exception as e:
         logging.error(f"Error generating response: {e}")
-        final_response = "I'm sorry, something went wrong. Could you please repeat your offer?"
-    
+        final_response = f"Let's talk! My counter offer is {counter_offer}."
+
     return final_response
+
 
 # --------------------------------------------------------------------------------
 # Rule-Based Negotiation Logic (including generate_counteroffer)
@@ -454,6 +402,12 @@ class RuleBasedNegotiation:
         if self.last_counter is None:
             self.last_counter = self.max_price
 
+        del_offer = customer_offer - self.last_offer if self.last_offer is not None else 0
+        logging.info(f"Round {self.negotiation_rounds} - del_offer: {del_offer}")
+        if del_offer < 0:
+            logging.warning("Offer cannot be lower than the previous bid")
+            return "invalid_offer"
+
         if customer_offer >= self.max_price:
             logging.info(f"Customer offered {customer_offer}, meeting/exceeding max price. Accepting deal.")
             return customer_offer
@@ -463,12 +417,21 @@ class RuleBasedNegotiation:
             logging.warning(f"Customer lowballed: {customer_offer}, Warning {self.lowball_rounds}/3.")
             if self.lowball_rounds > 3:
                 return "lowball_terminated"
-            # Slightly decrease the counteroffer (e.g., 2% reduction) to nudge higher offers
-            slight_decrease = self.last_counter * random.uniform(0.98, 0.99)
-            new_counter_offer = round(max(slight_decrease, self.acc_min_price), 1)
-            self.last_offer = customer_offer  # Log the previous customer offer
-            self.last_counter = new_counter_offer  # Update counter offer slightly
-            return "lowball_offer"
+            # For 1st lowball, no concession is given
+            if self.lowball_rounds == 1:
+                self.last_offer = customer_offer
+                return "lowball_warning_1"
+            # For 2nd lowball, offer a small concession (e.g., a 2% reduction)
+            elif self.lowball_rounds == 2:
+                concession_offer = round(self.last_counter * random.uniform(0.991, 0.995), 1)
+                self.last_offer = customer_offer
+                self.last_counter = concession_offer
+                return "lowball_warning_2"
+            # For 3rd lowball, repeat the concession with a final warning message
+            elif self.lowball_rounds == 3:
+                self.last_offer = customer_offer
+                return "lowball_warning_3"
+
 
         if intent == "affirmative":
             self.last_offer = customer_offer
@@ -504,11 +467,7 @@ class RuleBasedNegotiation:
             else:
                 return self.last_counter
 
-        del_offer = customer_offer - self.last_offer if self.last_offer is not None else 0
-        logging.info(f"Round {self.negotiation_rounds} - del_offer: {del_offer}")
-        if del_offer < 0:
-            logging.warning("Offer cannot be lower than the previous bid")
-            return "invalid_offer"
+        
 
         del_counter = 0
         offer_increase_percentage = (del_offer / self.last_offer) * 100 if self.last_offer else 0
@@ -631,12 +590,16 @@ async def start_negotiation(request: StartSessionRequest, background_tasks: Back
             session_id = existing_session.data[0]["session_id"]
         else:
             session_id = str(uuid.uuid4())
+            # Compute a dynamic welcome discount (95% of max_price)
+            welcome_offer = max_price * 0.95
+            # Get the product description (features)
+            product_features = pricing_data.get("product_description", "exceptional product features")
             insert_response = await run_query(lambda: supabase.table("history").insert([{
                 "session_id": session_id,
                 "user_id": request.user_id,
                 "product_id": request.product_id,
                 "customer_offer": 0,  # Log initial customer offer as one less than min_price
-                "counter_offer": pricing_data["max_price"],  # Set initial counter offer as max_price
+                "counter_offer": welcome_offer,  # Set initial counter offer as dynamic welcome offer
                 "round_number": 0,
                 "lowball_rounds": 0,
                 "consecutive_small_increases": 0,
@@ -645,12 +608,18 @@ async def start_negotiation(request: StartSessionRequest, background_tasks: Back
                 "created_at": datetime.utcnow().isoformat()
             }]).execute())
             logging.info(f"Insert response in /start_negotiation: {insert_response}")
-
+            # Build a dynamic welcome message using the product's max price, welcome discount, and features.
+            welcome_message = (
+                f"Welcome to the negotiation for product {request.product_id}! "
+                f"This product is currently priced at {max_price:.2f}, "
+                f"but as a special welcome offer, we can offer it at {welcome_offer:.2f}. "
+            )
         background_tasks.add_task(logging.info, f"/start_negotiation took {time.perf_counter() - start_time:.3f} seconds")
-        return {"session_id": session_id, "message": f"Welcome to the negotiation for product {request.product_id}."}
+        return {"session_id": session_id, "message": welcome_message}
     except Exception as e:
         logging.error(f"Error in /start_negotiation: {str(e)}")
         raise HTTPException(status_code=500, detail="Internal server error. Please try again later.")
+
 
 # --------------------------------------------------------------------------------
 # Updated /negotiate Endpoint
@@ -855,6 +824,16 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 }]).execute())
                 return {"status": "final_decision", "message": final_message, "counter_offer": negotiator.last_counter, "round_number": round_number}
 
+            # NEW MODIFICATION: If counter_offer is a marker string, replace with negotiator.last_counter
+            '''
+            if isinstance(counter_offer, str) and counter_offer in [
+                "final_decision", "affirmative_decision", "invalid_offer", 
+                "lowball_warning_1", "lowball_warning_2", "lowball_warning_3", 
+                "lowball_terminated", "close_offer"
+            ]:
+                counter_offer = negotiator.last_counter
+                '''
+
             if counter_offer == "invalid_offer":
                 invalid_message = await generate_response_async(
                     offer.customer_message,
@@ -882,10 +861,40 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 }]).execute())
                 return {"status": "failed", "message": invalid_message, "counter_offer": negotiator.last_counter, "round_number": round_number}
 
-
-            if counter_offer in ["lowball_offer", "lowball_terminated"]:
-                # NEW MODIFICATION: Log lowball offers in Supabase history
-                lowball_scenario = counter_offer  # This will be either "lowball_offer" or "lowball_terminated"
+            if counter_offer == "close_offer":
+                close_offer_message = await generate_response_async(
+                    offer.customer_message,
+                    extracted_data,
+                    negotiator.last_counter,
+                    round_number,
+                    conversation_history,
+                    scenario="close_offer",
+                    product_info=product_info
+                )
+                await run_query(lambda: supabase.table("history").insert([{
+                    "session_id": offer.session_id,
+                    "user_id": user_id,
+                    "product_id": product_id,
+                    "round_number": round_number,
+                    "customer_offer": extracted_offer,
+                    "counter_offer": negotiator.last_counter,
+                    "lowball_rounds": negotiator.lowball_rounds,
+                    "consecutive_small_increases": negotiator.consecutive_small_increases,
+                    "deal_status": "ongoing",
+                    "intent": "close_offer",
+                    "customer_message": offer.customer_message,
+                    "ai_response": close_offer_message,
+                    "created_at": datetime.utcnow().isoformat()
+                }]).execute())
+                return {
+                    "status": "ongoing",
+                    "human_response": close_offer_message,
+                    "counter_offer": negotiator.last_counter,
+                    "round_number": round_number
+                }
+                
+            if counter_offer in ["lowball_warning_1", "lowball_warning_2", "lowball_warning_3", "lowball_terminated"]:
+                lowball_scenario = counter_offer
                 lowball_message = await generate_response_async(
                     offer.customer_message,
                     extracted_data,
@@ -900,7 +909,6 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                     "user_id": user_id,
                     "product_id": product_id,
                     "round_number": round_number,
-                    # Log customer_offer as the extracted offer and counter_offer as negotiator.last_counter
                     "customer_offer": extracted_offer,
                     "counter_offer": negotiator.last_counter,
                     "lowball_rounds": negotiator.lowball_rounds,
@@ -914,6 +922,7 @@ async def negotiate(offer: OfferRequest, background_tasks: BackgroundTasks):
                 if negotiator.lowball_rounds > 3:
                     return {"status": "failed", "message": f"Unfortunately, we can't proceed with this pricing. Let me know if you'd like to reconsider your offer!", "counter_offer": negotiator.last_counter, "round_number": round_number}
                 return {"status": "pending", "human_response": lowball_message, "counter_offer": negotiator.last_counter, "round_number": round_number}
+
 
             if counter_offer is None:
                 terminated_scenario = "terminated_offer"
